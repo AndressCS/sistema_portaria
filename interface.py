@@ -90,8 +90,6 @@ def iniciar_tela():
     con.execute("PRAGMA busy_timeout=10000;")
     cur = con.cursor()
 
-
-
     # ===== tabela de logs =====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS logs (
@@ -187,6 +185,7 @@ def iniciar_tela():
                     window.destroy()
                 except Exception:
                     pass
+
         login.protocol("WM_DELETE_WINDOW", bloquear_sem_login)
 
         tk.Label(login, text="Usuário:").pack(pady=(15, 2))
@@ -457,7 +456,111 @@ def iniciar_tela():
 
         carregar_usuarios()
 
-    # ================= ENTRADA / BAIXA =================
+    # ================= FORMULÁRIO =================
+    frame_form = tk.Frame(window, bd=2, relief="ridge", padx=10, pady=10)
+    frame_form.pack(fill="x", padx=10, pady=10)
+
+    campos = ["Motorista", "Placa", "Telefone", "Fornecedor", "Destino", "Porteiro"]
+    vars_campos = {}
+
+    linha = 0
+    for campo in campos:
+        tk.Label(frame_form, text=campo).grid(row=linha, column=0, sticky="w")
+
+        if campo == "Destino":
+            var = tk.StringVar()
+            combo_destino = ttk.Combobox(frame_form, textvariable=var, values=EMPRESAS, state="readonly", width=38)
+            combo_destino.grid(row=linha, column=1, padx=5, pady=3)
+            vars_campos[campo] = var
+
+        elif campo == "Placa":
+            var = tk.StringVar()
+            vcmd = (window.register(validar_placa_digitar), "%P")
+            entry_placa = tk.Entry(frame_form, textvariable=var, width=40, validate="key", validatecommand=vcmd)
+            entry_placa.grid(row=linha, column=1, padx=5, pady=3)
+            vars_campos[campo] = var
+
+        elif campo == "Telefone":
+            var = tk.StringVar()
+            vcmd_tel = (window.register(validar_telefone_digitar), "%P")
+            tk.Entry(frame_form, textvariable=var, width=40, validate="key", validatecommand=vcmd_tel)\
+                .grid(row=linha, column=1, padx=5, pady=3)
+            vars_campos[campo] = var
+
+        else:
+            var = tk.StringVar()
+            var.trace_add("write", lambda *a, v=var: forcar_maiusculo(v))
+            if campo == "Porteiro":
+                entry_porteiro = tk.Entry(frame_form, textvariable=var, width=40)
+                entry_porteiro.grid(row=linha, column=1, padx=5, pady=3)
+            else:
+                tk.Entry(frame_form, textvariable=var, width=40).grid(row=linha, column=1, padx=5, pady=3)
+            vars_campos[campo] = var
+
+        linha += 1
+
+    var_motorista = vars_campos["Motorista"]
+    var_placa = vars_campos["Placa"]
+    var_telefone = vars_campos["Telefone"]
+    var_fornecedor = vars_campos["Fornecedor"]
+    var_destino = vars_campos["Destino"]
+    var_porteiro = vars_campos["Porteiro"]
+
+    # ✅ Garante maiúsculo também no campo placa (e sem loop)
+    def _placa_upper():
+        placa_norm = normalizar_placa(var_placa.get())
+        if var_placa.get() != placa_norm:
+            var_placa.set(placa_norm)
+
+    # ================= AUTO-PREENCHIMENTO POR PLACA =================
+    def autopreencher_por_placa():
+        placa_norm = normalizar_placa(var_placa.get())
+
+        # normaliza/força uppercase enquanto digita
+        if var_placa.get() != placa_norm:
+            var_placa.set(placa_norm)
+            return
+
+        # só tenta buscar quando tiver tamanho de placa completa
+        if len(placa_norm) < 7:
+            return
+
+        try:
+            cur.execute("""
+                SELECT motorista, telefone, fornecedor
+                FROM entradas
+                WHERE placa = ?
+                ORDER BY id DESC
+                LIMIT 1
+            """, (placa_norm,))
+            row = cur.fetchone()
+            if not row:
+                return
+
+            motorista_db, telefone_db, fornecedor_db = row
+
+            # não sobrescreve se já tiver preenchido
+            if not var_motorista.get():
+                var_motorista.set(motorista_db or "")
+            if not var_telefone.get():
+                var_telefone.set(telefone_db or "")
+            if not var_fornecedor.get():
+                var_fornecedor.set(fornecedor_db or "")
+        except Exception:
+            pass
+
+    # 🔗 liga o trace da placa: maiúsculo + autopreencher
+    var_placa.trace_add("write", lambda *a: autopreencher_por_placa())
+
+    # ================= FUNÇÕES DE ENTRADA / LIMPAR =================
+    def limpar_campos():
+        var_motorista.set("")
+        var_placa.set("")
+        var_telefone.set("")
+        var_fornecedor.set("")
+        combo_destino.set("")
+        # porteiro fica travado
+
     def registrar_entrada():
         try:
             placa_norm = normalizar_placa(var_placa.get())
@@ -509,16 +612,13 @@ def iniciar_tela():
                 detalhes=f"FORNECEDOR={var_fornecedor.get()} TEL={var_telefone.get()}"
             )
 
-            var_motorista.set("")
-            var_placa.set("")
-            var_telefone.set("")
-            var_fornecedor.set("")
-            combo_destino.set("")
-
+            limpar_campos()
             carregar_blocos()
+
         except Exception as e:
             messagebox.showerror("Erro ao registrar entrada", str(e))
 
+    # ================= BAIXA / DESFAZER =================
     def registrar_saida(id_registro):
         if id_registro in baixas_em_andamento:
             return
@@ -718,57 +818,7 @@ def iniciar_tela():
         tk.Button(frame_filtro, text="FILTRAR", command=carregar_logs).pack(side="left", padx=15)
         carregar_logs()
 
-    # ================= FORMULÁRIO =================
-    frame_form = tk.Frame(window, bd=2, relief="ridge", padx=10, pady=10)
-    frame_form.pack(fill="x", padx=10, pady=10)
-
-    campos = ["Motorista", "Placa", "Telefone", "Fornecedor", "Destino", "Porteiro"]
-    vars_campos = {}
-
-    linha = 0
-    for campo in campos:
-        tk.Label(frame_form, text=campo).grid(row=linha, column=0, sticky="w")
-
-        if campo == "Destino":
-            var = tk.StringVar()
-            combo_destino = ttk.Combobox(frame_form, textvariable=var, values=EMPRESAS, state="readonly", width=38)
-            combo_destino.grid(row=linha, column=1, padx=5, pady=3)
-            vars_campos[campo] = var
-
-        elif campo == "Placa":
-            var = tk.StringVar()
-            var.trace_add("write", lambda *a, v=var: forcar_maiusculo(v))
-            vcmd = (window.register(validar_placa_digitar), "%P")
-            tk.Entry(frame_form, textvariable=var, width=40, validate="key", validatecommand=vcmd)\
-                .grid(row=linha, column=1, padx=5, pady=3)
-            vars_campos[campo] = var
-
-        elif campo == "Telefone":
-            var = tk.StringVar()
-            vcmd_tel = (window.register(validar_telefone_digitar), "%P")
-            tk.Entry(frame_form, textvariable=var, width=40, validate="key", validatecommand=vcmd_tel)\
-                .grid(row=linha, column=1, padx=5, pady=3)
-            vars_campos[campo] = var
-
-        else:
-            var = tk.StringVar()
-            var.trace_add("write", lambda *a, v=var: forcar_maiusculo(v))
-            if campo == "Porteiro":
-                entry_porteiro = tk.Entry(frame_form, textvariable=var, width=40)
-                entry_porteiro.grid(row=linha, column=1, padx=5, pady=3)
-            else:
-                tk.Entry(frame_form, textvariable=var, width=40).grid(row=linha, column=1, padx=5, pady=3)
-            vars_campos[campo] = var
-
-        linha += 1
-
-    var_motorista = vars_campos["Motorista"]
-    var_placa = vars_campos["Placa"]
-    var_telefone = vars_campos["Telefone"]
-    var_fornecedor = vars_campos["Fornecedor"]
-    var_destino = vars_campos["Destino"]
-    var_porteiro = vars_campos["Porteiro"]
-
+    # ================= BOTÕES PRINCIPAIS =================
     tk.Button(frame_form, text="REGISTRAR ENTRADA", bg="#2980b9", fg="white", width=25,
               command=registrar_entrada).grid(row=linha, column=0, columnspan=2, pady=10)
 
@@ -852,17 +902,14 @@ def iniciar_tela():
             if d not in destinos_ordenados:
                 destinos_ordenados.append(d)
 
-        # quantos cards por linha dentro da empresa
-        CARDS_POR_LINHA = 2  # coloque 3 se quiser
+        CARDS_POR_LINHA = 2  # ajuste se quiser 3
 
         for col, destino in enumerate(destinos_ordenados):
             coluna = tk.Frame(frame_blocos, bd=2, relief="groove", padx=10, pady=10)
             coluna.grid(row=0, column=col, padx=10, pady=10, sticky="n")
 
-            # título (PACK) - ok
             tk.Label(coluna, text=destino, font=("Arial", 12, "bold")).pack(anchor="center", pady=(0, 8))
 
-            # ✅ área dos cards (GRID) - aqui não mistura com pack do título
             cards_area = tk.Frame(coluna)
             cards_area.pack()
 
