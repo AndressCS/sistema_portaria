@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox, ttk, simpledialog
+from tkinter import messagebox, ttk, simpledialog, filedialog
 import sqlite3
 from datetime import datetime
 import re
@@ -818,6 +818,251 @@ def iniciar_tela():
         tk.Button(frame_filtro, text="FILTRAR", command=carregar_logs).pack(side="left", padx=15)
         carregar_logs()
 
+    # ================= RELATÓRIOS + EXPORTAÇÃO =================
+    def _parse_dt(s: str):
+        if not s:
+            return None
+        s = s.strip()
+        for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                pass
+        return None
+
+    def _parse_data_simples(s: str):
+        # aceita "DD/MM/AAAA" (opcionalmente com hora)
+        if not s:
+            return None
+        s = s.strip()
+        for fmt in ("%d/%m/%Y", "%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S"):
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                pass
+        return None
+
+    def abrir_relatorios():
+        rel = tk.Toplevel(window)
+        rel.title("Relatórios e Exportação")
+        rel.state("zoomed")
+
+        # ===== filtros =====
+        frame_filtro = tk.Frame(rel, padx=10, pady=10, bd=2, relief="groove")
+        frame_filtro.pack(fill="x", padx=10, pady=10)
+
+        tk.Label(frame_filtro, text="Período (DD/MM/AAAA)").grid(row=0, column=0, sticky="w")
+        tk.Label(frame_filtro, text="Início:").grid(row=1, column=0, sticky="e")
+        var_ini = tk.StringVar()
+        e_ini = tk.Entry(frame_filtro, textvariable=var_ini, width=12)
+        e_ini.grid(row=1, column=1, padx=5)
+
+        tk.Label(frame_filtro, text="Fim:").grid(row=1, column=2, sticky="e")
+        var_fim = tk.StringVar()
+        e_fim = tk.Entry(frame_filtro, textvariable=var_fim, width=12)
+        e_fim.grid(row=1, column=3, padx=5)
+
+        tk.Label(frame_filtro, text="Status:").grid(row=1, column=4, sticky="e")
+        var_status = tk.StringVar(value="TODOS")
+        cb_status = ttk.Combobox(frame_filtro, textvariable=var_status, state="readonly",
+                                 values=["TODOS", "ATIVOS", "BAIXADOS"], width=10)
+        cb_status.grid(row=1, column=5, padx=5)
+
+        tk.Label(frame_filtro, text="Empresa/Destino:").grid(row=2, column=0, sticky="e")
+        var_dest = tk.StringVar()
+        var_dest.trace_add("write", lambda *a: forcar_maiusculo(var_dest))
+        e_dest = tk.Entry(frame_filtro, textvariable=var_dest, width=22)
+        e_dest.grid(row=2, column=1, padx=5, sticky="w")
+
+        tk.Label(frame_filtro, text="Fornecedor:").grid(row=2, column=2, sticky="e")
+        var_forn = tk.StringVar()
+        var_forn.trace_add("write", lambda *a: forcar_maiusculo(var_forn))
+        e_forn = tk.Entry(frame_filtro, textvariable=var_forn, width=22)
+        e_forn.grid(row=2, column=3, padx=5, sticky="w")
+
+        tk.Label(frame_filtro, text="Porteiro:").grid(row=2, column=4, sticky="e")
+        var_port = tk.StringVar()
+        var_port.trace_add("write", lambda *a: forcar_maiusculo(var_port))
+        e_port = tk.Entry(frame_filtro, textvariable=var_port, width=18)
+        e_port.grid(row=2, column=5, padx=5, sticky="w")
+
+        tk.Label(frame_filtro, text="Filtrar por data de:").grid(row=0, column=4, sticky="e")
+        var_tipo_data = tk.StringVar(value="ENTRADA")
+        cb_tipo = ttk.Combobox(frame_filtro, textvariable=var_tipo_data, state="readonly",
+                               values=["ENTRADA", "BAIXA"], width=10)
+        cb_tipo.grid(row=0, column=5, padx=5, sticky="w")
+
+        # ===== resumo =====
+        frame_resumo = tk.Frame(rel, padx=10, pady=6)
+        frame_resumo.pack(fill="x")
+
+        lbl_total = tk.Label(frame_resumo, text="Total: 0", font=("Arial", 11, "bold"))
+        lbl_total.pack(side="left", padx=5)
+
+        lbl_ativos = tk.Label(frame_resumo, text="Ativos: 0")
+        lbl_ativos.pack(side="left", padx=15)
+
+        lbl_baixados = tk.Label(frame_resumo, text="Baixados: 0")
+        lbl_baixados.pack(side="left", padx=15)
+
+        lbl_por_emp = tk.Label(frame_resumo, text="Por empresa: -")
+        lbl_por_emp.pack(side="left", padx=15)
+
+        # ===== tabela =====
+        frame_lista = tk.Frame(rel, padx=10, pady=10)
+        frame_lista.pack(fill="both", expand=True)
+
+        cols = ("id", "motorista", "placa", "telefone", "fornecedor", "destino", "entrada", "saida", "porteiro")
+        tree = ttk.Treeview(frame_lista, columns=cols, show="headings")
+        for c in cols:
+            tree.heading(c, text=c.upper())
+
+        tree.column("id", width=60, anchor="center")
+        tree.column("motorista", width=200)
+        tree.column("placa", width=90, anchor="center")
+        tree.column("telefone", width=110, anchor="center")
+        tree.column("fornecedor", width=160)
+        tree.column("destino", width=140)
+        tree.column("entrada", width=140, anchor="center")
+        tree.column("saida", width=140, anchor="center")
+        tree.column("porteiro", width=140)
+
+        frame_lista.grid_rowconfigure(0, weight=1)
+        frame_lista.grid_columnconfigure(0, weight=1)
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        sy = ttk.Scrollbar(frame_lista, orient="vertical", command=tree.yview)
+        sy.grid(row=0, column=1, sticky="ns")
+        sx = ttk.Scrollbar(frame_lista, orient="horizontal", command=tree.xview)
+        sx.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+
+        dados_atual = []  # guarda as linhas para exportar
+
+        def carregar_relatorio():
+            nonlocal dados_atual
+            for i in tree.get_children():
+                tree.delete(i)
+            dados_atual = []
+
+            ini = _parse_data_simples(var_ini.get())
+            fim = _parse_data_simples(var_fim.get())
+            if ini and fim and ini > fim:
+                messagebox.showwarning("Período inválido", "Data inicial maior que data final.")
+                return
+
+            # query base
+            q = """
+                SELECT id, motorista, placa, telefone, fornecedor, destino, data_hora, saida, porteiro
+                FROM entradas
+                WHERE 1=1
+            """
+            params = []
+
+            st = var_status.get()
+            if st == "ATIVOS":
+                q += " AND saida IS NULL"
+            elif st == "BAIXADOS":
+                q += " AND saida IS NOT NULL"
+
+            if var_dest.get().strip():
+                q += " AND destino LIKE ?"
+                params.append(f"%{var_dest.get().strip().upper()}%")
+
+            if var_forn.get().strip():
+                q += " AND fornecedor LIKE ?"
+                params.append(f"%{var_forn.get().strip().upper()}%")
+
+            if var_port.get().strip():
+                q += " AND porteiro LIKE ?"
+                params.append(f"%{var_port.get().strip().upper()}%")
+
+            q += " ORDER BY id DESC"
+            cur.execute(q, params)
+            rows = cur.fetchall()
+
+            # filtro de período em Python (porque as datas estão como texto BR)
+            tipo = var_tipo_data.get()
+            filtrado = []
+            for r in rows:
+                id_, mot, pla, tel, forn, dest, entrada, saida, port = r
+                dt_str = entrada if tipo == "ENTRADA" else saida
+                dt = _parse_dt(dt_str) if dt_str else None
+
+                if ini and dt:
+                    if dt < ini:
+                        continue
+                if fim and dt:
+                    # inclui o dia final inteiro
+                    fim_fechamento = fim.replace(hour=23, minute=59, second=59)
+                    if dt > fim_fechamento:
+                        continue
+
+                # se tipo == BAIXA e a linha não tem baixa, ignora quando período está preenchido
+                if tipo == "BAIXA" and (var_ini.get().strip() or var_fim.get().strip()) and not saida:
+                    continue
+
+                filtrado.append(r)
+
+            # preencher tabela
+            for r in filtrado:
+                tree.insert("", "end", values=r)
+            dados_atual = filtrado
+
+            # resumo
+            total = len(filtrado)
+            ativos = sum(1 for r in filtrado if r[7] is None)
+            baixados = total - ativos
+
+            # por empresa/destino (top 3)
+            cont = {}
+            for r in filtrado:
+                d = (r[5] or "").strip().upper()
+                cont[d] = cont.get(d, 0) + 1
+            top = sorted(cont.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_txt = ", ".join([f"{k}:{v}" for k, v in top]) if top else "-"
+
+            lbl_total.config(text=f"Total: {total}")
+            lbl_ativos.config(text=f"Ativos: {ativos}")
+            lbl_baixados.config(text=f"Baixados: {baixados}")
+            lbl_por_emp.config(text=f"Por empresa: {top_txt}")
+
+        def exportar_csv():
+            if not dados_atual:
+                messagebox.showwarning("Nada para exportar", "Gere o relatório antes de exportar.")
+                return
+
+            arquivo = filedialog.asksaveasfilename(
+                parent=rel,
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv")],
+                title="Salvar relatório como CSV"
+            )
+            if not arquivo:
+                return
+
+            try:
+                import csv
+                with open(arquivo, "w", newline="", encoding="utf-8-sig") as f:
+                    w = csv.writer(f, delimiter=";")
+                    w.writerow(["id", "motorista", "placa", "telefone", "fornecedor", "destino", "entrada", "saida", "porteiro"])
+                    for r in dados_atual:
+                        w.writerow(list(r))
+
+                messagebox.showinfo("Exportado", f"Relatório salvo em:\n{arquivo}")
+            except Exception as e:
+                messagebox.showerror("Erro ao exportar", str(e))
+
+        frame_btn = tk.Frame(rel, pady=10)
+        frame_btn.pack(fill="x")
+
+        ttk.Button(frame_btn, text="GERAR RELATÓRIO", command=carregar_relatorio).pack(side="left", padx=10)
+        ttk.Button(frame_btn, text="EXPORTAR CSV", command=exportar_csv).pack(side="left", padx=10)
+
+        # carregar de primeira (opcional)
+        carregar_relatorio()
+
+
     # ================= BOTÕES PRINCIPAIS =================
     tk.Button(frame_form, text="REGISTRAR ENTRADA", bg="#2980b9", fg="white", width=25,
               command=registrar_entrada).grid(row=linha, column=0, columnspan=2, pady=10)
@@ -833,6 +1078,9 @@ def iniciar_tela():
 
     tk.Button(frame_form, text="TROCAR USUÁRIO", bg="#c0392b", fg="white", width=25,
               command=logout).grid(row=linha + 4, column=0, columnspan=2, pady=5)
+
+    tk.Button(frame_form, text="RELATÓRIOS / EXPORTAR", bg="#16a085", fg="white", width=25,
+              command=abrir_relatorios).grid(row=linha + 5, column=0, columnspan=2, pady=5)
 
     # ================= BUSCA =================
     frame_busca = tk.Frame(window)
