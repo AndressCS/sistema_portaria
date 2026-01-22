@@ -7,6 +7,11 @@ import hashlib
 import secrets
 import os
 from PIL import Image, ImageTk
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
+import shutil
+from tkinter import filedialog
 
 
 DB_PATH = "portaria.db"
@@ -355,7 +360,7 @@ def iniciar_tela():
         # Detalhes (caixa)
         if detalhes_linhas:
             box = ttk.Frame(card, style="Card.TFrame", padding=10)
-            box.pack(fill="x", pady=(12, 0))
+            box.pack(side="left", padx=(0, 24), pady=10)
             box.configure(relief="solid")
             box["borderwidth"] = 1
 
@@ -672,8 +677,8 @@ def iniciar_tela():
         # ===== Painel HERO (esquerda) =====
         left_panel = ttk.Frame(wrapper, style="Card.TFrame", padding=22)
         left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
-        left_panel.configure(relief="solid")
-        left_panel["borderwidth"] = 1
+        left_panel.configure(relief="flat")
+        left_panel["borderwidth"] = 0
 
         # Topo do hero
         tk.Label(
@@ -692,29 +697,19 @@ def iniciar_tela():
             font=("Segoe UI", 12)
         ).pack(anchor="w", pady=(0, 16))
 
-        # Faixa de destaque “das empresas”
-        destaque = ttk.Frame(left_panel, style="Card.TFrame", padding=12)
-        destaque.pack(fill="x")
-        destaque.configure(relief="solid")
-        destaque["borderwidth"] = 1
+        # Header "DAS EMPRESAS" (compacto e alinhado com as logos)
+        header_emp = ttk.Frame(left_panel, style="Card.TFrame")
+        header_emp.pack(fill="x", pady=(2, 8))
 
         tk.Label(
-            destaque,
-            text="DAS EMPRESAS",
-            bg=COLORS["card"],
-            fg=COLORS["accent"],
-            font=("Segoe UI", 12, "bold")
-        ).pack(anchor="w")
-
-        tk.Label(
-            destaque,
+            header_emp,
             text="Acesso dedicado para operações e registros de portaria.",
             bg=COLORS["card"],
-            fg=COLORS["muted"],
+            fg="#6B7280",
             font=("Segoe UI", 10)
         ).pack(anchor="w", pady=(4, 0))
 
-        ttk.Separator(left_panel).pack(fill="x", pady=16)
+        ttk.Separator(left_panel).pack(fill="x", pady=(6, 14))
 
         # Logos grandes (sem transparência, sem watermark)
         logos_row = ttk.Frame(left_panel, style="Card.TFrame")
@@ -726,8 +721,8 @@ def iniciar_tela():
         def logo_box(parent, img, fallback_text):
             box = ttk.Frame(parent, style="Card.TFrame", padding=12)
             box.pack(side="left", padx=(0, 14))
-            box.configure(relief="solid")
-            box["borderwidth"] = 1
+            box.configure(relief="flat")
+            box["borderwidth"] = 0
 
             if img:
                 tk.Label(box, image=img, bg=COLORS["card"]).pack()
@@ -762,12 +757,12 @@ def iniciar_tela():
             chip = tk.Label(
                 chips_wrap,
                 text=nome,
-                bg="#EAF2FF",
-                fg=COLORS["primary"],
+                bg="#F3F4F6",  # cinza claro
+                fg="#1F2937",  # texto escuro
                 padx=10,
                 pady=6,
-                font=("Segoe UI", 9, "bold"),
-                bd=1,
+                font=("Segoe UI", 8, "bold"),
+                bd=0,
                 relief="solid"
             )
             chip.grid(row=r, column=c, sticky="w", padx=6, pady=6)
@@ -889,13 +884,13 @@ def iniciar_tela():
             command=tentar_login,
             bd=0,
             padx=16,
-            pady=12,
+            pady=14,
             bg=COLORS["primary"],
             fg="white",
             activebackground=COLORS["primary_dark"],
             activeforeground="white",
             cursor="hand2",
-            font=("Segoe UI", 11, "bold")
+            font=("Segoe UI", 12, "bold")
         )
         btn_login.pack(fill="x", padx=18, pady=(18, 0))
 
@@ -1797,41 +1792,143 @@ def iniciar_tela():
             baixados_var.set(f"Baixados: {baixados}")
             top_var.set(f"Por empresa: {top_txt}")
 
-        def exportar_csv():
+        def exportar_xlsx():
             if not dados_atual:
                 messagebox.showwarning("Nada para exportar", "Gere o relatório antes de exportar.")
                 return
 
             arquivo = filedialog.asksaveasfilename(
                 parent=rel,
-                defaultextension=".csv",
-                filetypes=[("CSV", "*.csv")],
-                title="Salvar relatório como CSV"
+                defaultextension=".xlsx",
+                filetypes=[("Excel", "*.xlsx")],
+                title="Salvar relatório como Excel"
             )
             if not arquivo:
                 return
 
             try:
-                import csv
-                with open(arquivo, "w", newline="", encoding="utf-8-sig") as f:
-                    w = csv.writer(f, delimiter=";")
-                    w.writerow(["id", "motorista", "placa", "telefone", "fornecedor", "destino", "entrada", "saida", "porteiro"])
-                    for r in dados_atual:
-                        w.writerow(list(r))
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "RELATORIO"
 
+                headers = ["ID", "MOTORISTA", "PLACA", "TELEFONE", "FORNECEDOR", "DESTINO", "ENTRADA", "SAIDA",
+                           "PORTEIRO"]
+
+                # ===== Resumo (linhas no topo) =====
+                titulo_fill = PatternFill("solid", fgColor="0B3D91")  # primary
+                titulo_font = Font(color="FFFFFF", bold=True, size=12)
+                subtitulo_font = Font(color="1F2937", bold=True)
+                normal_font = Font(color="1F2937")
+                left = Alignment(horizontal="left", vertical="center")
+                center = Alignment(horizontal="center", vertical="center")
+
+                # métricas básicas
+                total = len(dados_atual)
+                ativos = sum(1 for r in dados_atual if r[7] is None)  # saida
+                baixados = total - ativos
+
+                # filtros atuais (vêm dos campos do relatório)
+                tipo_data = (var_tipo_data.get() if 'var_tipo_data' in locals() else "")
+                ini = (var_ini.get().strip() if 'var_ini' in locals() else "")
+                fim = (var_fim.get().strip() if 'var_fim' in locals() else "")
+                status = (var_status.get() if 'var_status' in locals() else "")
+                destino = (var_dest.get().strip() if 'var_dest' in locals() else "")
+                fornecedor = (var_forn.get().strip() if 'var_forn' in locals() else "")
+                porteiro = (var_port.get().strip() if 'var_port' in locals() else "")
+
+                # Linha 1: Título
+                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+                c = ws.cell(row=1, column=1, value="RELATÓRIO - SISTEMA DE PORTARIA")
+                c.fill = titulo_fill
+                c.font = titulo_font
+                c.alignment = center
+                ws.row_dimensions[1].height = 22
+
+                # Linha 2: Gerado em
+                ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(headers))
+                c = ws.cell(row=2, column=1, value=f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+                c.font = normal_font
+                c.alignment = left
+
+                # Linha 3: Período / Tipo data
+                periodo_txt = f"Tipo de data: {tipo_data} | Período: {ini or '-'} até {fim or '-'} | Status: {status}"
+                ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(headers))
+                c = ws.cell(row=3, column=1, value=periodo_txt)
+                c.font = subtitulo_font
+                c.alignment = left
+
+                # Linha 4: filtros textuais
+                filtros_txt = f"Destino: {destino or '-'} | Fornecedor: {fornecedor or '-'} | Porteiro: {porteiro or '-'}"
+                ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(headers))
+                c = ws.cell(row=4, column=1, value=filtros_txt)
+                c.font = subtitulo_font
+                c.alignment = left
+
+                # Linha 5: resumo numérico
+                resumo_txt = f"Total: {total} | Ativos: {ativos} | Baixados: {baixados}"
+                ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=len(headers))
+                c = ws.cell(row=5, column=1, value=resumo_txt)
+                c.font = subtitulo_font
+                c.alignment = left
+
+                # Linha 6: espaço
+                ws.append([""] * len(headers))
+
+                # ===== Cabeçalho da tabela =====
+                header_fill = PatternFill("solid", fgColor="1E88E5")  # accent
+                header_font = Font(color="FFFFFF", bold=True)
+                header_alignment = Alignment(horizontal="center", vertical="center")
+
+                ws.append(headers)
+                header_row = ws.max_row
+
+                for col in range(1, len(headers) + 1):
+                    cell = ws.cell(row=header_row, column=col)
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = header_alignment
+
+                # ===== Dados =====
+                for r in dados_atual:
+                    ws.append(list(r))
+
+                # Congela topo (até header da tabela)
+                ws.freeze_panes = f"A{header_row + 1}"
+
+                # Alinhamento
+                for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row, min_col=1, max_col=len(headers)):
+                    for cell in row:
+                        cell.alignment = Alignment(vertical="center")
+
+                # Auto-ajuste simples das colunas
+                for col in range(1, len(headers) + 1):
+                    max_len = 0
+                    col_letter = get_column_letter(col)
+                    for cell in ws[col_letter]:
+                        val = "" if cell.value is None else str(cell.value)
+                        if len(val) > max_len:
+                            max_len = len(val)
+                    ws.column_dimensions[col_letter].width = min(max_len + 3, 55)
+
+                wb.save(arquivo)
                 messagebox.showinfo("Exportado", f"Relatório salvo em:\n{arquivo}")
-                set_status("Relatório exportado em CSV.", "success")
+                set_status("Relatório exportado em Excel.", "success")
+
             except Exception as e:
                 messagebox.showerror("Erro ao exportar", str(e))
-                set_status("Erro ao exportar CSV.", "error")
+                set_status("Erro ao exportar Excel.", "error")
 
         btns = ttk.Frame(filtro, style="Card.TFrame")
         btns.grid(row=1, column=8, rowspan=2, padx=10, sticky="ns")
 
         tk.Button(btns, text="GERAR", command=carregar_relatorio, bd=0, padx=12, pady=8,
                   bg=COLORS["primary"], fg="white", font=("Segoe UI", 9, "bold")).pack(fill="x", pady=(0, 8))
-        tk.Button(btns, text="EXPORTAR CSV", command=exportar_csv, bd=0, padx=12, pady=8,
-                  bg=COLORS["accent"], fg="white", font=("Segoe UI", 9, "bold")).pack(fill="x")
+        tk.Button(
+            btns, text="EXPORTAR EXCEL", command=exportar_xlsx,
+            bd=0, padx=12, pady=8,
+            bg=COLORS["accent"], fg="white",
+            font=("Segoe UI", 9, "bold")
+        ).pack(fill="x")
 
         carregar_relatorio()
 
