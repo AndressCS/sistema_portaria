@@ -5,6 +5,9 @@ from datetime import datetime
 import re
 import hashlib
 import secrets
+import os
+from PIL import Image, ImageTk
+
 
 DB_PATH = "portaria.db"
 
@@ -13,6 +16,21 @@ EMPRESAS = [
     "M&S", "TERRA BRASIL", "DRUGSTORE", "DISPAN",
     "MIX FARMA", "TEIXEIRA", "OUTROS"
 ]
+
+# ===== Paleta Azul Institucional =====
+COLORS = {
+    "primary": "#0B3D91",
+    "primary_dark": "#072B66",
+    "accent": "#1E88E5",
+    "bg": "#F4F6F9",
+    "card": "#FFFFFF",
+    "text": "#1F2937",
+    "muted": "#6B7280",
+    "success": "#1B5E20",
+    "warning": "#F59E0B",
+    "danger": "#B91C1C",
+    "border": "#D6D9DE",
+}
 
 
 # ================= FUNÇÕES AUXILIARES =================
@@ -76,21 +94,44 @@ def usuario_valido(u: str) -> bool:
     return bool(re.fullmatch(r"[A-Z0-9_]{3,20}", (u or "").upper()))
 
 
+def _asset_path(nome: str) -> str:
+    base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "assets", nome)
+
+
 # ================= INTERFACE =================
 
 def iniciar_tela():
     window = tk.Tk()
     window.title("Sistema de Portaria")
     window.state("zoomed")
-    window.resizable(True, True)
+    window.configure(bg=COLORS["bg"])
 
-    # ✅ Conexão mais resistente a locks
+    # ===== ttk style =====
+    style = ttk.Style(window)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+
+    style.configure("TFrame", background=COLORS["bg"])
+    style.configure("Card.TFrame", background=COLORS["card"])
+    style.configure("TLabel", background=COLORS["bg"], foreground=COLORS["text"])
+    style.configure("Header.TFrame", background=COLORS["primary"])
+    style.configure("Header.TLabel", background=COLORS["primary"], foreground="white")
+    style.configure("CardTitle.TLabel", background=COLORS["card"], foreground=COLORS["primary"],
+                    font=("Segoe UI", 11, "bold"))
+    style.configure("SmallMuted.TLabel", background=COLORS["card"], foreground=COLORS["muted"])
+    style.configure("TEntry", padding=6)
+    style.configure("TCombobox", padding=4)
+
+    # ===== DB =====
     con = sqlite3.connect(DB_PATH, timeout=10)
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA busy_timeout=10000;")
     cur = con.cursor()
 
-    # ===== tabela de logs =====
+    # ===== TABELAS =====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +146,6 @@ def iniciar_tela():
     """)
     con.commit()
 
-    # ===== tabela de usuários =====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS usuarios (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,35 +158,63 @@ def iniciar_tela():
     """)
     con.commit()
 
-    # Migração: coluna ATIVO
+    # ===== MIGRAÇÕES USUÁRIOS =====
     try:
         cur.execute("ALTER TABLE usuarios ADD COLUMN ativo INTEGER NOT NULL DEFAULT 1")
         con.commit()
     except Exception:
         pass
 
-    def criar_usuario_se_nao_existir(usuario: str, nome: str, senha: str, role: str = "PORTEIRO"):
-        usuario = (usuario or "").strip().upper()
-        nome = (nome or "").strip().upper()
-        role = (role or "").strip().upper()
+    # ===== MIGRAÇÕES ENTRADAS =====
+    def garantir_coluna(sql):
+        try:
+            cur.execute(sql)
+            con.commit()
+        except Exception:
+            pass
 
-        cur.execute("SELECT 1 FROM usuarios WHERE usuario = ?", (usuario,))
-        if cur.fetchone():
-            return
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS entradas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        motorista TEXT,
+        placa TEXT,
+        telefone TEXT,
+        fornecedor TEXT,
+        destino TEXT,
+        data_hora TEXT,
+        porteiro TEXT,
+        saida TEXT
+    )
+    """)
+    con.commit()
 
-        salt = secrets.token_hex(16)
-        senha_hash = hash_senha(senha, salt)
-        cur.execute("""
-            INSERT INTO usuarios (usuario, nome, salt, senha_hash, role, ativo)
-            VALUES (?, ?, ?, ?, ?, 1)
-        """, (usuario, nome, salt, senha_hash, role))
-        con.commit()
+    garantir_coluna("ALTER TABLE entradas ADD COLUMN telefone TEXT")
+    garantir_coluna("ALTER TABLE entradas ADD COLUMN fornecedor TEXT")
+    garantir_coluna("ALTER TABLE entradas ADD COLUMN destino TEXT")
+    garantir_coluna("ALTER TABLE entradas ADD COLUMN data_hora TEXT")
+    garantir_coluna("ALTER TABLE entradas ADD COLUMN porteiro TEXT")
+    garantir_coluna("ALTER TABLE entradas ADD COLUMN saida TEXT")
 
-    criar_usuario_se_nao_existir("ADMIN", "ADMIN", "ADMIN123", "ADMIN")
-
+    # ===== sessão =====
     usuario_logado = {"usuario": None, "nome": None, "role": None}
     baixas_em_andamento = set()
     desfazer_em_andamento = set()
+
+    # ===== status bar =====
+    status_var = tk.StringVar(value="Pronto.")
+
+    def set_status(msg: str, kind: str = "info"):
+        if kind == "success":
+            bg = COLORS["success"]
+        elif kind == "warning":
+            bg = COLORS["warning"]
+        elif kind == "error":
+            bg = COLORS["danger"]
+        else:
+            bg = COLORS["primary_dark"]
+
+        status_label.configure(bg=bg)
+        status_var.set(msg)
 
     def on_close():
         try:
@@ -168,17 +236,409 @@ def iniciar_tela():
         ))
         con.commit()
 
-    # ================= LOGIN =================
-    entry_porteiro = None
+    def criar_usuario_se_nao_existir(usuario: str, nome: str, senha: str, role: str = "PORTEIRO"):
+        usuario = (usuario or "").strip().upper()
+        nome = (nome or "").strip().upper()
+        role = (role or "").strip().upper()
+
+        cur.execute("SELECT 1 FROM usuarios WHERE usuario = ?", (usuario,))
+        if cur.fetchone():
+            return
+
+        salt = secrets.token_hex(16)
+        senha_hash = hash_senha(senha, salt)
+        cur.execute("""
+            INSERT INTO usuarios (usuario, nome, salt, senha_hash, role, ativo)
+            VALUES (?, ?, ?, ?, ?, 1)
+        """, (usuario, nome, salt, senha_hash, role))
+        con.commit()
+
+    criar_usuario_se_nao_existir("ADMIN", "ADMIN", "ADMIN123", "ADMIN")
+
+    # ================= MODAL PREMIUM =================
+
+    def confirmar_modal(
+        titulo: str,
+        mensagem: str,
+        texto_ok="CONFIRMAR",
+        texto_cancel="CANCELAR",
+        tipo="warning",
+        detalhes_linhas=None
+    ):
+        """
+        Modal premium de confirmação com:
+        - overlay escurecido
+        - animação fade-in
+        - Enter confirma / Esc cancela
+        - bloco de detalhes (placa/motorista/destino etc.)
+        Retorna True ou False.
+        """
+        detalhes_linhas = detalhes_linhas or []
+
+        # Overlay (escurece o fundo)
+        overlay = tk.Toplevel(window)
+        overlay.overrideredirect(True)
+        overlay.configure(bg="black")
+        overlay.attributes("-alpha", 0.0)  # animado
+        overlay.lift()
+        overlay.grab_set()
+
+        window.update_idletasks()
+        x = window.winfo_rootx()
+        y = window.winfo_rooty()
+        w = window.winfo_width()
+        h = window.winfo_height()
+        overlay.geometry(f"{w}x{h}+{x}+{y}")
+
+        # Modal
+        modal = tk.Toplevel(window)
+        modal.title(titulo)
+        modal.configure(bg=COLORS["bg"])
+        modal.resizable(False, False)
+        modal.transient(window)
+        modal.lift()
+        modal.attributes("-alpha", 0.0)  # animado
+        modal.grab_set()
+
+        # Ícone + cor
+        if tipo == "danger":
+            cor = COLORS["danger"]
+            icone = "⛔"
+        elif tipo == "info":
+            cor = COLORS["accent"]
+            icone = "ℹ️"
+        else:
+            cor = COLORS["warning"]
+            icone = "⚠️"
+
+        # Card
+        card = ttk.Frame(modal, style="Card.TFrame", padding=18)
+        card.pack(fill="both", expand=True)
+        card.configure(relief="solid")
+        card["borderwidth"] = 1
+
+        # Faixa superior
+        top = ttk.Frame(card, style="Card.TFrame")
+        top.pack(fill="x")
+
+        pill = tk.Label(
+            top,
+            text=icone,
+            bg=COLORS["card"],
+            fg=cor,
+            font=("Segoe UI", 22, "bold")
+        )
+        pill.pack(side="left", padx=(0, 10))
+
+        title_lbl = tk.Label(
+            top,
+            text=titulo,
+            bg=COLORS["card"],
+            fg=COLORS["primary"],
+            font=("Segoe UI", 14, "bold")
+        )
+        title_lbl.pack(side="left", pady=(2, 0))
+
+        ttk.Separator(card).pack(fill="x", pady=12)
+
+        msg_lbl = tk.Label(
+            card,
+            text=mensagem,
+            bg=COLORS["card"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 11),
+            justify="left",
+            wraplength=560
+        )
+        msg_lbl.pack(anchor="w")
+
+        # Detalhes (caixa)
+        if detalhes_linhas:
+            box = ttk.Frame(card, style="Card.TFrame", padding=10)
+            box.pack(fill="x", pady=(12, 0))
+            box.configure(relief="solid")
+            box["borderwidth"] = 1
+
+            tk.Label(
+                box,
+                text="DETALHES",
+                bg=COLORS["card"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 9, "bold")
+            ).pack(anchor="w")
+
+            for ln in detalhes_linhas:
+                tk.Label(
+                    box,
+                    text=ln,
+                    bg=COLORS["card"],
+                    fg=COLORS["text"],
+                    font=("Segoe UI", 10),
+                    justify="left",
+                    anchor="w"
+                ).pack(anchor="w", pady=1)
+
+        # Botões
+        btns = ttk.Frame(card, style="Card.TFrame")
+        btns.pack(fill="x", pady=(16, 0))
+
+        resultado = {"ok": False}
+
+        def fechar(ok: bool):
+            resultado["ok"] = ok
+            try:
+                modal.grab_release()
+            except Exception:
+                pass
+            try:
+                overlay.grab_release()
+            except Exception:
+                pass
+            overlay.destroy()
+            modal.destroy()
+
+        def on_escape(event=None):
+            fechar(False)
+
+        def on_enter(event=None):
+            fechar(True)
+
+        modal.bind("<Escape>", on_escape)
+
+        # Botão cancelar
+        btn_cancel = tk.Button(
+            btns,
+            text=texto_cancel,
+            command=lambda: fechar(False),
+            bd=0,
+            padx=14,
+            pady=10,
+            bg="#374151",
+            fg="white",
+            activebackground=COLORS["primary_dark"],
+            activeforeground="white",
+            cursor="hand2",
+            font=("Segoe UI", 10, "bold")
+        )
+        btn_cancel.pack(side="right", padx=(8, 0))
+
+        # Botão confirmar
+        btn_ok = tk.Button(
+            btns,
+            text=texto_ok,
+            command=lambda: fechar(True),
+            bd=0,
+            padx=14,
+            pady=10,
+            bg=cor,
+            fg="white",
+            activebackground=COLORS["primary_dark"],
+            activeforeground="white",
+            cursor="hand2",
+            font=("Segoe UI", 10, "bold")
+        )
+        btn_ok.pack(side="right")
+
+        # Enter confirma (global no modal)
+        modal.bind("<Return>", on_enter)
+
+        # Centralizar modal (tamanho real do conteúdo)
+        modal.update_idletasks()
+
+        # largura fixa “premium” (mantém visual consistente)
+        mw = 680
+        modal.geometry(f"{mw}x1")  # altura mínima provisória para o Tk recalcular
+
+        modal.update_idletasks()
+        req_w = max(mw, modal.winfo_reqwidth())
+        req_h = modal.winfo_reqheight()
+
+        # limita ao tamanho da tela (evita cortar em telas pequenas / escala alta)
+        screen_w = modal.winfo_screenwidth()
+        screen_h = modal.winfo_screenheight()
+
+        max_w = int(screen_w * 0.85)
+        max_h = int(screen_h * 0.85)
+
+        final_w = min(req_w, max_w)
+        final_h = min(req_h, max_h)
+
+        sx = window.winfo_rootx()
+        sy = window.winfo_rooty()
+        sw = window.winfo_width()
+        sh = window.winfo_height()
+
+        mx = sx + (sw // 2) - (final_w // 2)
+        my = sy + (sh // 2) - (final_h // 2)
+
+        # garante que não “escape” da tela
+        mx = max(10, min(mx, screen_w - final_w - 10))
+        my = max(10, min(my, screen_h - final_h - 10))
+
+        modal.geometry(f"{final_w}x{final_h}+{mx}+{my}")
+
+        # Animação fade-in
+        def fade(step=0):
+            # overlay até 0.22, modal até 1.0
+            o = min(0.22, step * 0.02)
+            m = min(1.0, step * 0.08)
+            try:
+                overlay.attributes("-alpha", o)
+                modal.attributes("-alpha", m)
+            except Exception:
+                return
+            if m < 1.0:
+                modal.after(12, lambda: fade(step + 1))
+
+        fade()
+
+        # foco
+        btn_ok.focus_set()
+        modal.wait_window()
+        return resultado["ok"]
+
+    # ================== LAYOUT PRINCIPAL ==================
+    root_container = ttk.Frame(window)
+    root_container.pack(fill="both", expand=True)
+
+    # ===== Header =====
+    header = ttk.Frame(root_container, style="Header.TFrame", padding=(14, 10))
+    header.pack(fill="x")
+
+    ttk.Label(header, text="SISTEMA DE PORTARIA", style="Header.TLabel",
+              font=("Segoe UI", 14, "bold")).pack(side="left")
+
+    user_label_var = tk.StringVar(value="Usuário: (não logado)")
+    ttk.Label(header, textvariable=user_label_var, style="Header.TLabel",
+              font=("Segoe UI", 10)).pack(side="left", padx=(12, 0))
+
+    header_btns = ttk.Frame(header, style="Header.TFrame")
+    header_btns.pack(side="right")
+
+    def header_button(parent, text, cmd, color=None):
+        return tk.Button(
+            parent,
+            text=text,
+            command=cmd,
+            bd=0,
+            padx=12,
+            pady=6,
+            fg="white",
+            bg=color or COLORS["accent"],
+            activebackground=COLORS["primary_dark"],
+            activeforeground="white",
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold")
+        )
+
+    # ===== Body =====
+    body = ttk.Frame(root_container, padding=(14, 12))
+    body.pack(fill="both", expand=True)
+
+    left = ttk.Frame(body)
+    left.pack(side="left", fill="y", padx=(0, 10))
+
+    right = ttk.Frame(body)
+    right.pack(side="left", fill="both", expand=True)
+
+    # ===== Cards (Form / Busca) =====
+    form_card = ttk.Frame(left, style="Card.TFrame", padding=12)
+    form_card.pack(fill="x", pady=(0, 10))
+    form_card.configure(relief="solid")
+    form_card["borderwidth"] = 1
+
+    ttk.Label(form_card, text="Cadastro de Entrada", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 10))
+
+    var_motorista = tk.StringVar()
+    var_placa = tk.StringVar()
+    var_telefone = tk.StringVar()
+    var_fornecedor = tk.StringVar()
+    var_destino = tk.StringVar()
+    var_porteiro = tk.StringVar()
+
+    var_motorista.trace_add("write", lambda *a: forcar_maiusculo(var_motorista))
+    var_fornecedor.trace_add("write", lambda *a: forcar_maiusculo(var_fornecedor))
+    var_porteiro.trace_add("write", lambda *a: forcar_maiusculo(var_porteiro))
+
+    form_grid = ttk.Frame(form_card, style="Card.TFrame")
+    form_grid.pack(fill="x")
+    form_grid.grid_columnconfigure(1, weight=1)
+
+    def mk_label(txt, r):
+        ttk.Label(form_grid, text=txt, background=COLORS["card"], foreground=COLORS["text"],
+                  font=("Segoe UI", 9, "bold")).grid(row=r, column=0, sticky="w", pady=4)
+
+    def mk_entry(var, r, validate=None):
+        e = ttk.Entry(form_grid, textvariable=var, width=32)
+        if validate:
+            e.configure(validate="key", validatecommand=validate)
+        e.grid(row=r, column=1, sticky="we", pady=4)
+        return e
+
+    mk_label("Motorista", 0)
+    entry_motorista = mk_entry(var_motorista, 0)
+
+    mk_label("Placa", 1)
+    vcmd_placa = (window.register(validar_placa_digitar), "%P")
+    entry_placa = mk_entry(var_placa, 1, validate=vcmd_placa)
+
+    mk_label("Telefone", 2)
+    vcmd_tel = (window.register(validar_telefone_digitar), "%P")
+    entry_tel = mk_entry(var_telefone, 2, validate=vcmd_tel)
+
+    mk_label("Fornecedor", 3)
+    entry_forn = mk_entry(var_fornecedor, 3)
+
+    mk_label("Destino", 4)
+    combo_destino = ttk.Combobox(form_grid, textvariable=var_destino, values=EMPRESAS, state="readonly", width=30)
+    combo_destino.grid(row=4, column=1, sticky="we", pady=4)
+
+    mk_label("Porteiro", 5)
+    entry_porteiro = mk_entry(var_porteiro, 5)
+
+    # ===== Busca =====
+    busca_card = ttk.Frame(left, style="Card.TFrame", padding=12)
+    busca_card.pack(fill="x", pady=(0, 10))
+    busca_card.configure(relief="solid")
+    busca_card["borderwidth"] = 1
+
+    ttk.Label(busca_card, text="Busca Rápida", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 10))
+    ttk.Label(busca_card, text="Pesquisar por placa ou empresa:", style="SmallMuted.TLabel").pack(anchor="w")
+
+    var_busca = tk.StringVar()
+    var_busca.trace_add("write", lambda *a: (forcar_maiusculo(var_busca), carregar_blocos()))
+    entry_busca = ttk.Entry(busca_card, textvariable=var_busca, width=30)
+    entry_busca.pack(fill="x", pady=(6, 0))
+
+    # ===== Botões principais =====
+    btns_card = ttk.Frame(left)
+    btns_card.pack(fill="x", pady=(0, 10))
+
+    def main_button(parent, text, cmd, color):
+        return tk.Button(
+            parent,
+            text=text,
+            command=cmd,
+            bd=0,
+            padx=12,
+            pady=10,
+            fg="white",
+            bg=color,
+            activebackground=COLORS["primary_dark"],
+            activeforeground="white",
+            cursor="hand2",
+            font=("Segoe UI", 10, "bold")
+        )
+
+    # ================= LOGIN / USUÁRIOS =================
 
     def abrir_login():
         login = tk.Toplevel(window)
-        login.title("Login")
-        login.geometry("350x240")
-        login.resizable(False, False)
+        login.title("Login - Sistema de Portaria")
+        login.state("zoomed")
+        login.configure(bg=COLORS["bg"])
         login.grab_set()
 
-        # ✅ se fechar login sem autenticar -> fecha o sistema
         def bloquear_sem_login():
             if usuario_logado.get("usuario") is None:
                 try:
@@ -188,18 +648,198 @@ def iniciar_tela():
 
         login.protocol("WM_DELETE_WINDOW", bloquear_sem_login)
 
-        tk.Label(login, text="Usuário:").pack(pady=(15, 2))
+        # ===== Helpers de imagem (sem Canvas, sem watermark) =====
+        def carregar_imagem(nome_arquivo, tamanho=None):
+            caminho = _asset_path(nome_arquivo)
+            try:
+                img = Image.open(caminho).convert("RGBA")
+                if tamanho:
+                    img = img.resize(tamanho, Image.LANCZOS)
+                return ImageTk.PhotoImage(img)
+            except Exception as e:
+                print("Erro ao carregar imagem:", e)
+                print("Tentou abrir em:", caminho)
+                return None
+
+        # ===== Wrapper geral =====
+        wrapper = ttk.Frame(login, padding=28)
+        wrapper.pack(fill="both", expand=True)
+
+        wrapper.grid_columnconfigure(0, weight=6)  # hero
+        wrapper.grid_columnconfigure(1, weight=4)  # card
+        wrapper.grid_rowconfigure(0, weight=1)
+
+        # ===== Painel HERO (esquerda) =====
+        left_panel = ttk.Frame(wrapper, style="Card.TFrame", padding=22)
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        left_panel.configure(relief="solid")
+        left_panel["borderwidth"] = 1
+
+        # Topo do hero
+        tk.Label(
+            left_panel,
+            text="SISTEMA DE PORTARIA",
+            bg=COLORS["card"],
+            fg=COLORS["primary"],
+            font=("Segoe UI", 28, "bold")
+        ).pack(anchor="w", pady=(2, 2))
+
+        tk.Label(
+            left_panel,
+            text="Controle de entradas, baixas, histórico, logs e relatórios — de forma rápida e segura.",
+            bg=COLORS["card"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 12)
+        ).pack(anchor="w", pady=(0, 16))
+
+        # Faixa de destaque “das empresas”
+        destaque = ttk.Frame(left_panel, style="Card.TFrame", padding=12)
+        destaque.pack(fill="x")
+        destaque.configure(relief="solid")
+        destaque["borderwidth"] = 1
+
+        tk.Label(
+            destaque,
+            text="DAS EMPRESAS",
+            bg=COLORS["card"],
+            fg=COLORS["accent"],
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w")
+
+        tk.Label(
+            destaque,
+            text="Acesso dedicado para operações e registros de portaria.",
+            bg=COLORS["card"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 10)
+        ).pack(anchor="w", pady=(4, 0))
+
+        ttk.Separator(left_panel).pack(fill="x", pady=16)
+
+        # Logos grandes (sem transparência, sem watermark)
+        logos_row = ttk.Frame(left_panel, style="Card.TFrame")
+        logos_row.pack(fill="x")
+
+        login._logo_verzani = carregar_imagem("verzani.png", (420, 170))
+        login._logo_ceipe = carregar_imagem("ceipe.png", (420, 170))
+
+        def logo_box(parent, img, fallback_text):
+            box = ttk.Frame(parent, style="Card.TFrame", padding=12)
+            box.pack(side="left", padx=(0, 14))
+            box.configure(relief="solid")
+            box["borderwidth"] = 1
+
+            if img:
+                tk.Label(box, image=img, bg=COLORS["card"]).pack()
+            else:
+                tk.Label(box, text=fallback_text, bg=COLORS["card"], fg=COLORS["muted"],
+                         font=("Segoe UI", 16, "bold")).pack()
+
+        logo_box(logos_row, login._logo_verzani, "VERZANI")
+        logo_box(logos_row, login._logo_ceipe, "CEIPE")
+
+        ttk.Separator(left_panel).pack(fill="x", pady=16)
+
+        # Empresas em GRID fixo (não empurra / não treme)
+        tk.Label(
+            left_panel,
+            text="EMPRESAS / DESTINOS ATENDIDOS",
+            bg=COLORS["card"],
+            fg=COLORS["primary"],
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w")
+
+        chips_wrap = ttk.Frame(left_panel, style="Card.TFrame")
+        chips_wrap.pack(fill="x", pady=(10, 0))
+
+        cols = 4  # estável e bonito
+        for i in range(cols):
+            chips_wrap.grid_columnconfigure(i, weight=1)
+
+        r = 0
+        c = 0
+        for nome in EMPRESAS:
+            chip = tk.Label(
+                chips_wrap,
+                text=nome,
+                bg="#EAF2FF",
+                fg=COLORS["primary"],
+                padx=10,
+                pady=6,
+                font=("Segoe UI", 9, "bold"),
+                bd=1,
+                relief="solid"
+            )
+            chip.grid(row=r, column=c, sticky="w", padx=6, pady=6)
+
+            c += 1
+            if c >= cols:
+                c = 0
+                r += 1
+
+        # ===== Painel LOGIN (direita) =====
+        right_panel = ttk.Frame(wrapper, style="Card.TFrame", padding=0)
+        right_panel.grid(row=0, column=1, sticky="nsew")
+        right_panel.configure(relief="solid")
+        right_panel["borderwidth"] = 1
+
+        # Borda dupla para “sombra fake” (premium e leve)
+        inner_shadow = tk.Frame(right_panel, bg="#E5E7EB")  # cinza claro
+        inner_shadow.pack(fill="both", expand=True, padx=12, pady=12)
+
+        inner = tk.Frame(inner_shadow, bg=COLORS["card"])
+        inner.pack(fill="both", expand=True, padx=2, pady=2)
+
+        # Conteúdo do card
+        tk.Label(
+            inner,
+            text="Acesso ao sistema",
+            bg=COLORS["card"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 18, "bold")
+        ).pack(anchor="w", padx=18, pady=(18, 6))
+
+        tk.Label(
+            inner,
+            text="Entre com seu usuário e senha.",
+            bg=COLORS["card"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 11)
+        ).pack(anchor="w", padx=18, pady=(0, 16))
+
+        # Form
+        form = tk.Frame(inner, bg=COLORS["card"])
+        form.pack(fill="x", padx=18)
+
         var_user = tk.StringVar()
-        e_user = tk.Entry(login, textvariable=var_user)
-        e_user.pack()
-
-        tk.Label(login, text="Senha:").pack(pady=(10, 2))
+        var_user.trace_add("write", lambda *a: forcar_maiusculo(var_user))
         var_pass = tk.StringVar()
-        e_pass = tk.Entry(login, textvariable=var_pass, show="*")
-        e_pass.pack()
+        var_show = tk.BooleanVar(value=False)
 
-        lbl_status = tk.Label(login, text="", fg="red")
-        lbl_status.pack(pady=10)
+        def label(txt):
+            tk.Label(form, text=txt, bg=COLORS["card"], fg=COLORS["muted"],
+                     font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 6))
+
+        label("Usuário")
+        e_user = ttk.Entry(form, textvariable=var_user)
+        e_user.pack(fill="x", ipady=7)
+
+        label("Senha")
+        pass_row = tk.Frame(form, bg=COLORS["card"])
+        pass_row.pack(fill="x")
+
+        e_pass = ttk.Entry(pass_row, textvariable=var_pass, show="*")
+        e_pass.pack(side="left", fill="x", expand=True, ipady=7)
+
+        def toggle_senha():
+            e_pass.configure(show="" if var_show.get() else "*")
+
+        ttk.Checkbutton(pass_row, text="Mostrar", variable=var_show, command=toggle_senha) \
+            .pack(side="left", padx=(10, 0))
+
+        lbl_status = tk.Label(inner, text="", bg=COLORS["card"], fg=COLORS["danger"],
+                              font=("Segoe UI", 10, "bold"))
+        lbl_status.pack(anchor="w", padx=18, pady=(12, 0))
 
         def tentar_login():
             u = (var_user.get() or "").strip().upper()
@@ -210,10 +850,10 @@ def iniciar_tela():
                 return
 
             cur.execute("""
-                SELECT usuario, nome, salt, senha_hash, role, ativo
-                FROM usuarios
-                WHERE usuario = ?
-            """, (u,))
+                        SELECT usuario, nome, salt, senha_hash, role, ativo
+                        FROM usuarios
+                        WHERE usuario = ?
+                        """, (u,))
             row = cur.fetchone()
             if not row:
                 lbl_status.config(text="Usuário não encontrado.")
@@ -233,44 +873,86 @@ def iniciar_tela():
             usuario_logado["role"] = role_db
 
             var_porteiro.set(nome_db)
-            if entry_porteiro is not None:
-                entry_porteiro.config(state="disabled")
+            try:
+                entry_porteiro.configure(state="disabled")
+            except Exception:
+                pass
 
+            user_label_var.set(f"Usuário: {nome_db} ({role_db})")
+            set_status("Login realizado.", "success")
             login.destroy()
 
-        tk.Button(login, text="ENTRAR", width=18, command=tentar_login).pack(pady=5)
+        # Botão principal
+        btn_login = tk.Button(
+            inner,
+            text="ENTRAR",
+            command=tentar_login,
+            bd=0,
+            padx=16,
+            pady=12,
+            bg=COLORS["primary"],
+            fg="white",
+            activebackground=COLORS["primary_dark"],
+            activeforeground="white",
+            cursor="hand2",
+            font=("Segoe UI", 11, "bold")
+        )
+        btn_login.pack(fill="x", padx=18, pady=(18, 0))
 
-        def ao_enter(event):
+        # Rodapé com dicas
+        tk.Label(
+            inner,
+            text="Enter para entrar • Esc para limpar senha",
+            bg=COLORS["card"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9)
+        ).pack(anchor="w", padx=18, pady=(12, 18))
+
+        # Teclas
+        def ao_enter(event=None):
             tentar_login()
+
+        def ao_esc(event=None):
+            var_pass.set("")
+            lbl_status.config(text="")
 
         e_user.bind("<Return>", ao_enter)
         e_pass.bind("<Return>", ao_enter)
+        login.bind("<Escape>", ao_esc)
+
         e_user.focus_set()
 
     def logout():
-        if not messagebox.askyesno("Trocar usuário", "Deseja trocar o usuário logado?"):
+        nome_atual = usuario_logado.get("nome") or ""
+        usuario_atual = usuario_logado.get("usuario") or ""
+
+        if not confirmar_modal(
+            "Trocar usuário",
+            "Deseja realmente trocar o usuário logado?\n\nVocê retornará para a tela de login.",
+            texto_ok="TROCAR",
+            texto_cancel="CANCELAR",
+            tipo="info",
+            detalhes_linhas=[
+                f"USUÁRIO: {usuario_atual}",
+                f"NOME: {nome_atual}"
+            ] if nome_atual or usuario_atual else []
+        ):
             return
 
         if usuario_logado.get("nome"):
-            registrar_log(
-                acao="LOGOUT",
-                porteiro=usuario_logado.get("nome"),
-                detalhes=f"TROCOU USUÁRIO (de {usuario_logado.get('usuario')})"
-            )
+            registrar_log("LOGOUT", porteiro=usuario_logado.get("nome"),
+                          detalhes=f"TROCOU USUÁRIO (de {usuario_logado.get('usuario')})")
 
         usuario_logado["usuario"] = None
         usuario_logado["nome"] = None
         usuario_logado["role"] = None
 
-        try:
-            entry_porteiro.config(state="normal")
-        except Exception:
-            pass
+        entry_porteiro.configure(state="normal")
         var_porteiro.set("")
+        user_label_var.set("Usuário: (não logado)")
 
         abrir_login()
 
-    # ================= TELA DE CADASTRO (ADMIN) =================
     def abrir_cadastro_usuarios():
         if usuario_logado.get("role") != "ADMIN":
             messagebox.showwarning("Acesso negado", "Apenas ADMIN pode gerenciar usuários.")
@@ -279,12 +961,19 @@ def iniciar_tela():
         win = tk.Toplevel(window)
         win.title("Cadastro de Usuários")
         win.state("zoomed")
+        win.configure(bg=COLORS["bg"])
 
-        topo = tk.Frame(win, pady=10)
-        topo.pack(fill="x")
-        tk.Label(topo, text="Usuários do Sistema", font=("Arial", 14, "bold")).pack(side="left", padx=10)
+        container = ttk.Frame(win, padding=14)
+        container.pack(fill="both", expand=True)
 
-        frame_lista = tk.Frame(win, padx=10, pady=10)
+        card = ttk.Frame(container, style="Card.TFrame", padding=12)
+        card.pack(fill="both", expand=True)
+        card.configure(relief="solid")
+        card["borderwidth"] = 1
+
+        ttk.Label(card, text="Usuários do Sistema", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 10))
+
+        frame_lista = ttk.Frame(card, style="Card.TFrame")
         frame_lista.pack(fill="both", expand=True)
 
         cols = ("usuario", "nome", "role", "ativo")
@@ -293,28 +982,23 @@ def iniciar_tela():
         tree.heading("nome", text="NOME")
         tree.heading("role", text="PERFIL")
         tree.heading("ativo", text="ATIVO")
-
         tree.column("usuario", width=140, anchor="w")
         tree.column("nome", width=260, anchor="w")
         tree.column("role", width=120, anchor="center")
         tree.column("ativo", width=80, anchor="center")
 
-        # ✅ GRID para scroll sempre funcionar
         frame_lista.grid_rowconfigure(0, weight=1)
         frame_lista.grid_columnconfigure(0, weight=1)
-
         tree.grid(row=0, column=0, sticky="nsew")
 
         scroll_y = ttk.Scrollbar(frame_lista, orient="vertical", command=tree.yview)
         scroll_y.grid(row=0, column=1, sticky="ns")
-
         scroll_x = ttk.Scrollbar(frame_lista, orient="horizontal", command=tree.xview)
         scroll_x.grid(row=1, column=0, sticky="ew")
-
         tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
-        frame_btn = tk.Frame(win, pady=10)
-        frame_btn.pack(fill="x")
+        btns = ttk.Frame(card, style="Card.TFrame")
+        btns.pack(fill="x", pady=(10, 0))
 
         def carregar_usuarios():
             for item in tree.get_children():
@@ -372,8 +1056,8 @@ def iniciar_tela():
 
                 registrar_log("USER_CREATE", porteiro=usuario_logado.get("nome"),
                               detalhes=f"CRIADO: usuario={u} nome={n} role={role}")
+                set_status(f"Usuário {u} criado.", "success")
                 carregar_usuarios()
-                messagebox.showinfo("Sucesso", f"Usuário {u} criado.")
             except sqlite3.IntegrityError:
                 messagebox.showwarning("Já existe", "Este usuário já existe.")
             except Exception as e:
@@ -399,7 +1083,7 @@ def iniciar_tela():
             con.commit()
 
             registrar_log("USER_RESET_PASS", porteiro=usuario_logado.get("nome"), detalhes=f"RESET SENHA: usuario={u}")
-            messagebox.showinfo("Ok", f"Senha do usuário {u} atualizada.")
+            set_status(f"Senha do usuário {u} atualizada.", "success")
 
         def trocar_role():
             sel = get_sel()
@@ -421,6 +1105,7 @@ def iniciar_tela():
 
             registrar_log("USER_ROLE", porteiro=usuario_logado.get("nome"),
                           detalhes=f"ROLE: usuario={u} de={r} para={novo}")
+            set_status(f"Perfil de {u} atualizado.", "success")
             carregar_usuarios()
 
         def ativar_desativar():
@@ -438,7 +1123,14 @@ def iniciar_tela():
             novo_ativo = 0 if ativo_atual == 1 else 1
             acao_txt = "DESATIVAR" if novo_ativo == 0 else "ATIVAR"
 
-            if not messagebox.askyesno("Confirmar", f"Deseja {acao_txt} o usuário {u}?"):
+            if not confirmar_modal(
+                "Confirmar alteração",
+                f"Deseja {acao_txt} o usuário selecionado?",
+                texto_ok=acao_txt,
+                texto_cancel="CANCELAR",
+                tipo="warning",
+                detalhes_linhas=[f"USUÁRIO: {u}", f"NOME: {n}", f"PERFIL: {r}"]
+            ):
                 return
 
             cur.execute("UPDATE usuarios SET ativo=? WHERE usuario=?", (novo_ativo, u))
@@ -446,82 +1138,29 @@ def iniciar_tela():
 
             registrar_log("USER_ACTIVE", porteiro=usuario_logado.get("nome"),
                           detalhes=f"ATIVO: usuario={u} para={'SIM' if novo_ativo == 1 else 'NÃO'}")
+            set_status(f"Usuário {u} atualizado.", "success")
             carregar_usuarios()
 
-        ttk.Button(frame_btn, text="NOVO USUÁRIO", command=novo_usuario).pack(side="left", padx=10)
-        ttk.Button(frame_btn, text="RESETAR SENHA", command=reset_senha).pack(side="left", padx=10)
-        ttk.Button(frame_btn, text="TROCAR PERFIL", command=trocar_role).pack(side="left", padx=10)
-        ttk.Button(frame_btn, text="ATIVAR/DESATIVAR", command=ativar_desativar).pack(side="left", padx=10)
-        ttk.Button(frame_btn, text="ATUALIZAR LISTA", command=carregar_usuarios).pack(side="right", padx=10)
+        tk.Button(btns, text="NOVO", command=novo_usuario, bd=0, padx=10, pady=8,
+                  bg=COLORS["primary"], fg="white", font=("Segoe UI", 9, "bold")).pack(side="left", padx=6)
+        tk.Button(btns, text="RESET SENHA", command=reset_senha, bd=0, padx=10, pady=8,
+                  bg=COLORS["accent"], fg="white", font=("Segoe UI", 9, "bold")).pack(side="left", padx=6)
+        tk.Button(btns, text="TROCAR PERFIL", command=trocar_role, bd=0, padx=10, pady=8,
+                  bg=COLORS["primary_dark"], fg="white", font=("Segoe UI", 9, "bold")).pack(side="left", padx=6)
+        tk.Button(btns, text="ATIVAR/DESATIVAR", command=ativar_desativar, bd=0, padx=10, pady=8,
+                  bg=COLORS["warning"], fg="white", font=("Segoe UI", 9, "bold")).pack(side="left", padx=6)
+        tk.Button(btns, text="ATUALIZAR", command=carregar_usuarios, bd=0, padx=10, pady=8,
+                  bg="#374151", fg="white", font=("Segoe UI", 9, "bold")).pack(side="right", padx=6)
 
         carregar_usuarios()
-
-    # ================= FORMULÁRIO =================
-    frame_form = tk.Frame(window, bd=2, relief="ridge", padx=10, pady=10)
-    frame_form.pack(fill="x", padx=10, pady=10)
-
-    campos = ["Motorista", "Placa", "Telefone", "Fornecedor", "Destino", "Porteiro"]
-    vars_campos = {}
-
-    linha = 0
-    for campo in campos:
-        tk.Label(frame_form, text=campo).grid(row=linha, column=0, sticky="w")
-
-        if campo == "Destino":
-            var = tk.StringVar()
-            combo_destino = ttk.Combobox(frame_form, textvariable=var, values=EMPRESAS, state="readonly", width=38)
-            combo_destino.grid(row=linha, column=1, padx=5, pady=3)
-            vars_campos[campo] = var
-
-        elif campo == "Placa":
-            var = tk.StringVar()
-            vcmd = (window.register(validar_placa_digitar), "%P")
-            entry_placa = tk.Entry(frame_form, textvariable=var, width=40, validate="key", validatecommand=vcmd)
-            entry_placa.grid(row=linha, column=1, padx=5, pady=3)
-            vars_campos[campo] = var
-
-        elif campo == "Telefone":
-            var = tk.StringVar()
-            vcmd_tel = (window.register(validar_telefone_digitar), "%P")
-            tk.Entry(frame_form, textvariable=var, width=40, validate="key", validatecommand=vcmd_tel)\
-                .grid(row=linha, column=1, padx=5, pady=3)
-            vars_campos[campo] = var
-
-        else:
-            var = tk.StringVar()
-            var.trace_add("write", lambda *a, v=var: forcar_maiusculo(v))
-            if campo == "Porteiro":
-                entry_porteiro = tk.Entry(frame_form, textvariable=var, width=40)
-                entry_porteiro.grid(row=linha, column=1, padx=5, pady=3)
-            else:
-                tk.Entry(frame_form, textvariable=var, width=40).grid(row=linha, column=1, padx=5, pady=3)
-            vars_campos[campo] = var
-
-        linha += 1
-
-    var_motorista = vars_campos["Motorista"]
-    var_placa = vars_campos["Placa"]
-    var_telefone = vars_campos["Telefone"]
-    var_fornecedor = vars_campos["Fornecedor"]
-    var_destino = vars_campos["Destino"]
-    var_porteiro = vars_campos["Porteiro"]
-
-    # ✅ Garante maiúsculo também no campo placa (e sem loop)
-    def _placa_upper():
-        placa_norm = normalizar_placa(var_placa.get())
-        if var_placa.get() != placa_norm:
-            var_placa.set(placa_norm)
 
     # ================= AUTO-PREENCHIMENTO POR PLACA =================
     def autopreencher_por_placa():
         placa_norm = normalizar_placa(var_placa.get())
-
-        # normaliza/força uppercase enquanto digita
         if var_placa.get() != placa_norm:
             var_placa.set(placa_norm)
             return
 
-        # só tenta buscar quando tiver tamanho de placa completa
         if len(placa_norm) < 7:
             return
 
@@ -539,7 +1178,6 @@ def iniciar_tela():
 
             motorista_db, telefone_db, fornecedor_db = row
 
-            # não sobrescreve se já tiver preenchido
             if not var_motorista.get():
                 var_motorista.set(motorista_db or "")
             if not var_telefone.get():
@@ -549,17 +1187,16 @@ def iniciar_tela():
         except Exception:
             pass
 
-    # 🔗 liga o trace da placa: maiúsculo + autopreencher
     var_placa.trace_add("write", lambda *a: autopreencher_por_placa())
 
-    # ================= FUNÇÕES DE ENTRADA / LIMPAR =================
+    # ================= FUNÇÕES DE NEGÓCIO =================
     def limpar_campos():
         var_motorista.set("")
         var_placa.set("")
         var_telefone.set("")
         var_fornecedor.set("")
-        combo_destino.set("")
-        # porteiro fica travado
+        var_destino.set("")
+        set_status("Campos limpos.", "info")
 
     def registrar_entrada():
         try:
@@ -571,22 +1208,25 @@ def iniciar_tela():
 
             if not placa_valida(placa_norm):
                 messagebox.showwarning("Placa inválida", "Formato: ABC1234 ou ABC1D23")
+                set_status("Placa inválida.", "warning")
                 return
 
             if not all([
-                var_motorista.get(),
-                var_placa.get(),
-                var_telefone.get(),
-                var_fornecedor.get(),
-                var_destino.get(),
-                var_porteiro.get()
+                var_motorista.get().strip(),
+                var_placa.get().strip(),
+                var_telefone.get().strip(),
+                var_fornecedor.get().strip(),
+                var_destino.get().strip(),
+                var_porteiro.get().strip()
             ]):
                 messagebox.showwarning("Atenção", "Preencha todos os campos.")
+                set_status("Preencha todos os campos.", "warning")
                 return
 
             cur.execute("SELECT id FROM entradas WHERE placa = ? AND saida IS NULL", (var_placa.get(),))
             if cur.fetchone():
                 messagebox.showwarning("Placa já registrada", "Este veículo já possui ENTRADA ATIVA.")
+                set_status("Placa já possui entrada ativa.", "warning")
                 return
 
             cur.execute("""
@@ -594,52 +1234,87 @@ def iniciar_tela():
                 (motorista, placa, telefone, fornecedor, destino, data_hora, porteiro)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
-                var_motorista.get(),
-                var_placa.get(),
-                var_telefone.get(),
-                var_fornecedor.get(),
-                var_destino.get(),
+                var_motorista.get().strip().upper(),
+                var_placa.get().strip().upper(),
+                var_telefone.get().strip(),
+                var_fornecedor.get().strip().upper(),
+                var_destino.get().strip().upper(),
                 datetime.now().strftime("%d/%m/%Y %H:%M"),
-                var_porteiro.get()
+                var_porteiro.get().strip().upper()
             ))
             con.commit()
+            entrada_id = cur.lastrowid
 
             registrar_log(
                 acao="ENTRADA",
+                entrada_id=entrada_id,
                 placa=var_placa.get(),
                 destino=var_destino.get(),
                 porteiro=usuario_logado.get("nome") or var_porteiro.get(),
                 detalhes=f"FORNECEDOR={var_fornecedor.get()} TEL={var_telefone.get()}"
             )
 
+            set_status(f"Entrada registrada: {var_placa.get()} em {var_destino.get()}.", "success")
             limpar_campos()
             carregar_blocos()
 
         except Exception as e:
             messagebox.showerror("Erro ao registrar entrada", str(e))
+            set_status("Erro ao registrar entrada.", "error")
 
-    # ================= BAIXA / DESFAZER =================
     def registrar_saida(id_registro):
         if id_registro in baixas_em_andamento:
             return
         baixas_em_andamento.add(id_registro)
+
         try:
-            if not messagebox.askyesno("Confirmar baixa", "Deseja realmente registrar a saída deste veículo?"):
+            cur.execute("""
+                SELECT placa, motorista, destino, telefone, fornecedor, data_hora, porteiro
+                FROM entradas
+                WHERE id = ?
+            """, (id_registro,))
+            row = cur.fetchone()
+            if not row:
+                messagebox.showwarning("Não encontrado", "Registro não encontrado.")
                 return
 
-            cur.execute("SELECT placa, destino FROM entradas WHERE id = ?", (id_registro,))
-            row = cur.fetchone()
-            placa_, destino_ = (row[0], row[1]) if row else ("", "")
+            placa_, motorista_, destino_, telefone_, fornecedor_, entrada_, porteiro_ = row
+
+            if not confirmar_modal(
+                "Confirmar baixa",
+                "Deseja realmente registrar a SAÍDA deste veículo?\n\nEsta ação moverá o registro para o histórico.",
+                texto_ok="REGISTRAR SAÍDA",
+                texto_cancel="CANCELAR",
+                tipo="warning",
+                detalhes_linhas=[
+                    f"PLACA: {placa_}",
+                    f"MOTORISTA: {motorista_}",
+                    f"DESTINO: {destino_}",
+                    f"TEL: {telefone_}   |   FORN: {fornecedor_}",
+                    f"ENTRADA: {entrada_}   |   PORTEIRO: {porteiro_}"
+                ]
+            ):
+                return
 
             cur.execute("UPDATE entradas SET saida = ? WHERE id = ?",
                         (datetime.now().strftime("%d/%m/%Y %H:%M"), id_registro))
             con.commit()
 
-            registrar_log("BAIXA", entrada_id=id_registro, placa=placa_, destino=destino_,
-                          porteiro=usuario_logado.get("nome") or var_porteiro.get(), detalhes="REGISTRO DE SAÍDA")
+            registrar_log(
+                acao="BAIXA",
+                entrada_id=id_registro,
+                placa=placa_,
+                destino=destino_,
+                porteiro=usuario_logado.get("nome") or var_porteiro.get(),
+                detalhes="REGISTRO DE SAÍDA"
+            )
+
+            set_status(f"Saída registrada: {placa_}.", "success")
             carregar_blocos()
+
         except Exception as e:
             messagebox.showerror("Erro ao registrar saída", str(e))
+            set_status("Erro ao registrar saída.", "error")
         finally:
             baixas_em_andamento.discard(id_registro)
 
@@ -653,131 +1328,238 @@ def iniciar_tela():
         desfazer_em_andamento.add(id_registro)
 
         try:
-            if not messagebox.askyesno("Desfazer baixa", "Deseja DESFAZER a baixa deste veículo?"):
+            cur.execute("""
+                SELECT placa, motorista, destino, telefone, fornecedor, data_hora, saida, porteiro
+                FROM entradas
+                WHERE id = ?
+            """, (id_registro,))
+            row = cur.fetchone()
+            if not row:
+                messagebox.showwarning("Não encontrado", "Registro não encontrado.")
                 return
 
-            cur.execute("SELECT placa, destino FROM entradas WHERE id = ?", (id_registro,))
-            row = cur.fetchone()
-            placa_, destino_ = (row[0], row[1]) if row else ("", "")
+            placa_, motorista_, destino_, telefone_, fornecedor_, entrada_, saida_, porteiro_ = row
+
+            if not confirmar_modal(
+                "Desfazer baixa",
+                "Deseja DESFAZER a baixa deste veículo?\n\nO registro voltará para 'Entradas Ativas'.",
+                texto_ok="DESFAZER",
+                texto_cancel="CANCELAR",
+                tipo="danger",
+                detalhes_linhas=[
+                    f"PLACA: {placa_}",
+                    f"MOTORISTA: {motorista_}",
+                    f"DESTINO: {destino_}",
+                    f"TEL: {telefone_}   |   FORN: {fornecedor_}",
+                    f"ENTRADA: {entrada_}   |   BAIXA: {saida_}",
+                    f"PORTEIRO (REGISTRO): {porteiro_}",
+                    f"ADMIN (DESFAZENDO): {usuario_logado.get('nome')}"
+                ]
+            ):
+                return
 
             cur.execute("UPDATE entradas SET saida = NULL WHERE id = ?", (id_registro,))
             con.commit()
 
-            registrar_log("DESFAZER_BAIXA", entrada_id=id_registro, placa=placa_, destino=destino_,
-                          porteiro=usuario_logado.get("nome"), detalhes="BAIXA DESFEITA")
+            registrar_log(
+                acao="DESFAZER_BAIXA",
+                entrada_id=id_registro,
+                placa=placa_,
+                destino=destino_,
+                porteiro=usuario_logado.get("nome"),
+                detalhes="BAIXA DESFEITA"
+            )
+
+            set_status(f"Baixa desfeita: {placa_}.", "success")
             carregar_blocos()
+
         except Exception as e:
             messagebox.showerror("Erro ao desfazer baixa", str(e))
+            set_status("Erro ao desfazer baixa.", "error")
         finally:
             desfazer_em_andamento.discard(id_registro)
 
-    # ================= HISTÓRICO / LOGS =================
+    # ================= HISTÓRICO / LOGS / RELATÓRIOS =================
     def abrir_historico():
         hist = tk.Toplevel(window)
         hist.title("Histórico de Baixas")
         hist.state("zoomed")
+        hist.configure(bg=COLORS["bg"])
 
-        frame_filtro = tk.Frame(hist, pady=10)
-        frame_filtro.pack(fill="x")
+        container = ttk.Frame(hist, padding=14)
+        container.pack(fill="both", expand=True)
 
-        tk.Label(frame_filtro, text="Data da baixa (DD/MM/AAAA):").pack(side="left", padx=5)
+        filtro = ttk.Frame(container, style="Card.TFrame", padding=12)
+        filtro.pack(fill="x", pady=(0, 10))
+        filtro.configure(relief="solid")
+        filtro["borderwidth"] = 1
+
+        ttk.Label(filtro, text="Filtros", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        ttk.Label(filtro, text="Data da baixa (DD/MM/AAAA):", background=COLORS["card"]).grid(row=1, column=0, sticky="e")
         var_data = tk.StringVar()
-        tk.Entry(frame_filtro, textvariable=var_data, width=15).pack(side="left", padx=5)
+        ttk.Entry(filtro, textvariable=var_data, width=16).grid(row=1, column=1, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Empresa / Destino:").pack(side="left", padx=5)
+        ttk.Label(filtro, text="Empresa/Destino:", background=COLORS["card"]).grid(row=1, column=2, sticky="e")
         var_empresa = tk.StringVar()
         var_empresa.trace_add("write", lambda *a: forcar_maiusculo(var_empresa))
-        tk.Entry(frame_filtro, textvariable=var_empresa, width=25).pack(side="left", padx=5)
+        ttk.Entry(filtro, textvariable=var_empresa, width=24).grid(row=1, column=3, padx=6, sticky="w")
 
-        frame_lista = tk.Frame(hist)
-        frame_lista.pack(fill="both", expand=True)
+        lista_card = ttk.Frame(container, style="Card.TFrame", padding=12)
+        lista_card.pack(fill="both", expand=True)
+        lista_card.configure(relief="solid")
+        lista_card["borderwidth"] = 1
+
+        ttk.Label(lista_card, text="Registros baixados", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 10))
+
+        canvas = tk.Canvas(lista_card, bg=COLORS["card"], highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(lista_card, orient="vertical", command=canvas.yview)
+        sb.pack(side="right", fill="y")
+        canvas.configure(yscrollcommand=sb.set)
+
+        frame_lista = ttk.Frame(canvas, style="Card.TFrame")
+        win_id = canvas.create_window((0, 0), window=frame_lista, anchor="nw")
+
+        def _scrollregion(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        frame_lista.bind("<Configure>", _scrollregion)
+
+        def _resize(event):
+            canvas.itemconfig(win_id, width=event.width)
+
+        canvas.bind("<Configure>", _resize)
 
         def carregar_historico():
             for w in frame_lista.winfo_children():
                 w.destroy()
 
             query = """
-                SELECT id, motorista, placa, telefone, fornecedor, destino,
-                       data_hora, saida, porteiro
+                SELECT id, motorista, placa, telefone, fornecedor, destino, data_hora, saida, porteiro
                 FROM entradas
                 WHERE saida IS NOT NULL
             """
             params = []
-            if var_data.get():
+
+            if var_data.get().strip():
                 query += " AND saida LIKE ?"
-                params.append(f"%{var_data.get()}%")
-            if var_empresa.get():
+                params.append(f"%{var_data.get().strip()}%")
+
+            if var_empresa.get().strip():
                 query += " AND destino LIKE ?"
-                params.append(f"%{var_empresa.get()}%")
+                params.append(f"%{var_empresa.get().strip().upper()}%")
+
             query += " ORDER BY saida DESC"
 
             cur.execute(query, params)
-            for r in cur.fetchall():
-                id_reg, motorista, placa, telefone, fornecedor, destino, entrada, saida, porteiro = r
-                bloco = tk.Frame(frame_lista, bd=2, relief="groove", padx=10, pady=5)
-                bloco.pack(fill="x", padx=10, pady=5)
+            rows = cur.fetchall()
 
-                texto = (
-                    f"Motorista: {motorista}\n"
-                    f"Placa: {placa}\n"
-                    f"Telefone: {telefone}\n"
-                    f"Fornecedor: {fornecedor}\n"
-                    f"Destino: {destino}\n"
-                    f"Entrada: {entrada}\n"
-                    f"Baixa: {saida}\n"
-                    f"Porteiro (entrada): {porteiro}"
-                )
-                tk.Label(bloco, text=texto, justify="left").pack(anchor="w")
+            if not rows:
+                ttk.Label(frame_lista, text="Nenhum registro encontrado.", background=COLORS["card"],
+                          foreground=COLORS["muted"]).pack(anchor="w")
+                return
+
+            for r in rows:
+                id_reg, motorista, placa, telefone, fornecedor, destino, entrada, saida, porteiro = r
+
+                bloco = ttk.Frame(frame_lista, style="Card.TFrame", padding=10)
+                bloco.pack(fill="x", pady=6)
+                bloco.configure(relief="solid")
+                bloco["borderwidth"] = 1
+
+                ttk.Label(bloco, text=f"{placa}  •  {motorista}", background=COLORS["card"],
+                          foreground=COLORS["primary"], font=("Segoe UI", 10, "bold")).pack(anchor="w")
+                ttk.Label(bloco, text=f"TEL: {telefone}   |   FORN: {fornecedor}   |   DEST: {destino}",
+                          background=COLORS["card"]).pack(anchor="w", pady=(6, 0))
+                ttk.Label(bloco, text=f"ENTRADA: {entrada}   |   BAIXA: {saida}   |   PORTEIRO: {porteiro}",
+                          background=COLORS["card"], foreground=COLORS["muted"]).pack(anchor="w", pady=(2, 0))
 
                 tk.Button(
-                    bloco, text="DESFAZER BAIXA",
-                    bg="#e67e22", fg="white",
-                    command=lambda i=id_reg: desfazer_baixa(i)
-                ).pack(anchor="e", padx=10, pady=5)
+                    bloco, text="DESFAZER BAIXA", command=lambda i=id_reg: desfazer_baixa(i),
+                    bd=0, padx=10, pady=6, bg=COLORS["warning"], fg="white",
+                    font=("Segoe UI", 9, "bold"), cursor="hand2"
+                ).pack(anchor="e", pady=(8, 0))
 
-        tk.Button(frame_filtro, text="FILTRAR", command=carregar_historico).pack(side="left", padx=15)
+        tk.Button(
+            filtro, text="FILTRAR", command=carregar_historico,
+            bd=0, padx=10, pady=8, bg=COLORS["primary"], fg="white", font=("Segoe UI", 9, "bold")
+        ).grid(row=1, column=4, padx=8)
+
         carregar_historico()
 
     def abrir_logs():
         logw = tk.Toplevel(window)
         logw.title("Logs do Sistema")
         logw.state("zoomed")
+        logw.configure(bg=COLORS["bg"])
 
-        frame_filtro = tk.Frame(logw, pady=10)
-        frame_filtro.pack(fill="x")
+        container = ttk.Frame(logw, padding=14)
+        container.pack(fill="both", expand=True)
 
-        tk.Label(frame_filtro, text="Data (DD/MM/AAAA):").pack(side="left", padx=5)
+        filtro = ttk.Frame(container, style="Card.TFrame", padding=12)
+        filtro.pack(fill="x", pady=(0, 10))
+        filtro.configure(relief="solid")
+        filtro["borderwidth"] = 1
+
+        ttk.Label(filtro, text="Filtros", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        ttk.Label(filtro, text="Data (DD/MM/AAAA):", background=COLORS["card"]).grid(row=1, column=0, sticky="e")
         var_data = tk.StringVar()
-        tk.Entry(frame_filtro, textvariable=var_data, width=15).pack(side="left", padx=5)
+        ttk.Entry(filtro, textvariable=var_data, width=16).grid(row=1, column=1, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Placa:").pack(side="left", padx=5)
+        ttk.Label(filtro, text="Placa:", background=COLORS["card"]).grid(row=1, column=2, sticky="e")
         var_placa_f = tk.StringVar()
         var_placa_f.trace_add("write", lambda *a: forcar_maiusculo(var_placa_f))
-        tk.Entry(frame_filtro, textvariable=var_placa_f, width=12).pack(side="left", padx=5)
+        ttk.Entry(filtro, textvariable=var_placa_f, width=12).grid(row=1, column=3, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Porteiro:").pack(side="left", padx=5)
+        ttk.Label(filtro, text="Porteiro:", background=COLORS["card"]).grid(row=1, column=4, sticky="e")
         var_porteiro_f = tk.StringVar()
         var_porteiro_f.trace_add("write", lambda *a: forcar_maiusculo(var_porteiro_f))
-        tk.Entry(frame_filtro, textvariable=var_porteiro_f, width=18).pack(side="left", padx=5)
+        ttk.Entry(filtro, textvariable=var_porteiro_f, width=18).grid(row=1, column=5, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Ação:").pack(side="left", padx=5)
+        ttk.Label(filtro, text="Ação:", background=COLORS["card"]).grid(row=1, column=6, sticky="e")
         var_acao = tk.StringVar(value="TODAS")
         combo_acao = ttk.Combobox(
-            frame_filtro,
-            textvariable=var_acao,
+            filtro, textvariable=var_acao, state="readonly",
             values=["TODAS", "ENTRADA", "BAIXA", "DESFAZER_BAIXA", "LOGOUT",
                     "USER_CREATE", "USER_RESET_PASS", "USER_ROLE", "USER_ACTIVE"],
-            state="readonly",
             width=18
         )
-        combo_acao.pack(side="left", padx=5)
+        combo_acao.grid(row=1, column=7, padx=6, sticky="w")
 
-        frame_lista = tk.Frame(logw)
-        frame_lista.pack(fill="both", expand=True)
+        lista = ttk.Frame(container, style="Card.TFrame", padding=12)
+        lista.pack(fill="both", expand=True)
+        lista.configure(relief="solid")
+        lista["borderwidth"] = 1
+
+        ttk.Label(lista, text="Logs", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 10))
+
+        cols = ("id", "data_hora", "acao", "entrada_id", "placa", "destino", "porteiro", "detalhes")
+        tree = ttk.Treeview(lista, columns=cols, show="headings")
+        for c in cols:
+            tree.heading(c, text=c.upper())
+
+        tree.column("id", width=60, anchor="center")
+        tree.column("data_hora", width=160, anchor="center")
+        tree.column("acao", width=140, anchor="center")
+        tree.column("entrada_id", width=90, anchor="center")
+        tree.column("placa", width=90, anchor="center")
+        tree.column("destino", width=140)
+        tree.column("porteiro", width=140)
+        tree.column("detalhes", width=500)
+
+        tree.pack(fill="both", expand=True)
+
+        sb_y = ttk.Scrollbar(lista, orient="vertical", command=tree.yview)
+        sb_y.pack(side="right", fill="y")
+        sb_x = ttk.Scrollbar(lista, orient="horizontal", command=tree.xview)
+        sb_x.pack(side="bottom", fill="x")
+        tree.configure(yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
 
         def carregar_logs():
-            for w in frame_lista.winfo_children():
-                w.destroy()
+            for i in tree.get_children():
+                tree.delete(i)
 
             query = """
                 SELECT id, data_hora, acao, entrada_id, placa, destino, porteiro, detalhes
@@ -785,40 +1567,37 @@ def iniciar_tela():
                 WHERE 1=1
             """
             params = []
-            if var_data.get():
+
+            if var_data.get().strip():
                 query += " AND data_hora LIKE ?"
-                params.append(f"%{var_data.get()}%")
-            if var_placa_f.get():
+                params.append(f"%{var_data.get().strip()}%")
+
+            if var_placa_f.get().strip():
                 query += " AND placa LIKE ?"
-                params.append(f"%{var_placa_f.get()}%")
-            if var_porteiro_f.get():
+                params.append(f"%{var_placa_f.get().strip().upper()}%")
+
+            if var_porteiro_f.get().strip():
                 query += " AND porteiro LIKE ?"
-                params.append(f"%{var_porteiro_f.get()}%")
+                params.append(f"%{var_porteiro_f.get().strip().upper()}%")
+
             if var_acao.get() != "TODAS":
                 query += " AND acao = ?"
                 params.append(var_acao.get())
+
             query += " ORDER BY id DESC"
 
             cur.execute(query, params)
             for r in cur.fetchall():
-                _id, data_hora, acao, entrada_id, placa, destino, porteiro, detalhes = r
-                bloco = tk.Frame(frame_lista, bd=2, relief="groove", padx=10, pady=5)
-                bloco.pack(fill="x", padx=10, pady=5)
-                texto = (
-                    f"Data/Hora: {data_hora}\n"
-                    f"Ação: {acao}\n"
-                    f"Entrada ID: {entrada_id}\n"
-                    f"Placa: {placa}\n"
-                    f"Destino: {destino}\n"
-                    f"Porteiro: {porteiro}\n"
-                    f"Detalhes: {detalhes}"
-                )
-                tk.Label(bloco, text=texto, justify="left").pack(anchor="w")
+                tree.insert("", "end", values=r)
 
-        tk.Button(frame_filtro, text="FILTRAR", command=carregar_logs).pack(side="left", padx=15)
+        tk.Button(
+            filtro, text="FILTRAR", command=carregar_logs,
+            bd=0, padx=10, pady=8, bg=COLORS["primary"], fg="white", font=("Segoe UI", 9, "bold")
+        ).grid(row=1, column=8, padx=8)
+
         carregar_logs()
 
-    # ================= RELATÓRIOS + EXPORTAÇÃO =================
+    # ===== Relatórios + Exportação CSV =====
     def _parse_dt(s: str):
         if not s:
             return None
@@ -831,7 +1610,6 @@ def iniciar_tela():
         return None
 
     def _parse_data_simples(s: str):
-        # aceita "DD/MM/AAAA" (opcionalmente com hora)
         if not s:
             return None
         s = s.strip()
@@ -846,74 +1624,75 @@ def iniciar_tela():
         rel = tk.Toplevel(window)
         rel.title("Relatórios e Exportação")
         rel.state("zoomed")
+        rel.configure(bg=COLORS["bg"])
 
-        # ===== filtros =====
-        frame_filtro = tk.Frame(rel, padx=10, pady=10, bd=2, relief="groove")
-        frame_filtro.pack(fill="x", padx=10, pady=10)
+        container = ttk.Frame(rel, padding=14)
+        container.pack(fill="both", expand=True)
 
-        tk.Label(frame_filtro, text="Período (DD/MM/AAAA)").grid(row=0, column=0, sticky="w")
-        tk.Label(frame_filtro, text="Início:").grid(row=1, column=0, sticky="e")
+        filtro = ttk.Frame(container, style="Card.TFrame", padding=12)
+        filtro.pack(fill="x", pady=(0, 10))
+        filtro.configure(relief="solid")
+        filtro["borderwidth"] = 1
+
+        ttk.Label(filtro, text="Relatórios", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        ttk.Label(filtro, text="Tipo de data:", background=COLORS["card"]).grid(row=1, column=0, sticky="e")
+        var_tipo_data = tk.StringVar(value="ENTRADA")
+        cb_tipo = ttk.Combobox(filtro, textvariable=var_tipo_data, state="readonly",
+                               values=["ENTRADA", "BAIXA"], width=10)
+        cb_tipo.grid(row=1, column=1, padx=6, sticky="w")
+
+        ttk.Label(filtro, text="Início (DD/MM/AAAA):", background=COLORS["card"]).grid(row=1, column=2, sticky="e")
         var_ini = tk.StringVar()
-        e_ini = tk.Entry(frame_filtro, textvariable=var_ini, width=12)
-        e_ini.grid(row=1, column=1, padx=5)
+        ttk.Entry(filtro, textvariable=var_ini, width=14).grid(row=1, column=3, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Fim:").grid(row=1, column=2, sticky="e")
+        ttk.Label(filtro, text="Fim (DD/MM/AAAA):", background=COLORS["card"]).grid(row=1, column=4, sticky="e")
         var_fim = tk.StringVar()
-        e_fim = tk.Entry(frame_filtro, textvariable=var_fim, width=12)
-        e_fim.grid(row=1, column=3, padx=5)
+        ttk.Entry(filtro, textvariable=var_fim, width=14).grid(row=1, column=5, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Status:").grid(row=1, column=4, sticky="e")
+        ttk.Label(filtro, text="Status:", background=COLORS["card"]).grid(row=1, column=6, sticky="e")
         var_status = tk.StringVar(value="TODOS")
-        cb_status = ttk.Combobox(frame_filtro, textvariable=var_status, state="readonly",
+        cb_status = ttk.Combobox(filtro, textvariable=var_status, state="readonly",
                                  values=["TODOS", "ATIVOS", "BAIXADOS"], width=10)
-        cb_status.grid(row=1, column=5, padx=5)
+        cb_status.grid(row=1, column=7, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Empresa/Destino:").grid(row=2, column=0, sticky="e")
+        ttk.Label(filtro, text="Destino:", background=COLORS["card"]).grid(row=2, column=0, sticky="e")
         var_dest = tk.StringVar()
         var_dest.trace_add("write", lambda *a: forcar_maiusculo(var_dest))
-        e_dest = tk.Entry(frame_filtro, textvariable=var_dest, width=22)
-        e_dest.grid(row=2, column=1, padx=5, sticky="w")
+        ttk.Entry(filtro, textvariable=var_dest, width=22).grid(row=2, column=1, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Fornecedor:").grid(row=2, column=2, sticky="e")
+        ttk.Label(filtro, text="Fornecedor:", background=COLORS["card"]).grid(row=2, column=2, sticky="e")
         var_forn = tk.StringVar()
         var_forn.trace_add("write", lambda *a: forcar_maiusculo(var_forn))
-        e_forn = tk.Entry(frame_filtro, textvariable=var_forn, width=22)
-        e_forn.grid(row=2, column=3, padx=5, sticky="w")
+        ttk.Entry(filtro, textvariable=var_forn, width=22).grid(row=2, column=3, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Porteiro:").grid(row=2, column=4, sticky="e")
+        ttk.Label(filtro, text="Porteiro:", background=COLORS["card"]).grid(row=2, column=4, sticky="e")
         var_port = tk.StringVar()
         var_port.trace_add("write", lambda *a: forcar_maiusculo(var_port))
-        e_port = tk.Entry(frame_filtro, textvariable=var_port, width=18)
-        e_port.grid(row=2, column=5, padx=5, sticky="w")
+        ttk.Entry(filtro, textvariable=var_port, width=18).grid(row=2, column=5, padx=6, sticky="w")
 
-        tk.Label(frame_filtro, text="Filtrar por data de:").grid(row=0, column=4, sticky="e")
-        var_tipo_data = tk.StringVar(value="ENTRADA")
-        cb_tipo = ttk.Combobox(frame_filtro, textvariable=var_tipo_data, state="readonly",
-                               values=["ENTRADA", "BAIXA"], width=10)
-        cb_tipo.grid(row=0, column=5, padx=5, sticky="w")
+        resumo = ttk.Frame(container, style="Card.TFrame", padding=12)
+        resumo.pack(fill="x", pady=(0, 10))
+        resumo.configure(relief="solid")
+        resumo["borderwidth"] = 1
 
-        # ===== resumo =====
-        frame_resumo = tk.Frame(rel, padx=10, pady=6)
-        frame_resumo.pack(fill="x")
+        total_var = tk.StringVar(value="Total: 0")
+        ativos_var = tk.StringVar(value="Ativos: 0")
+        baixados_var = tk.StringVar(value="Baixados: 0")
+        top_var = tk.StringVar(value="Por empresa: -")
 
-        lbl_total = tk.Label(frame_resumo, text="Total: 0", font=("Arial", 11, "bold"))
-        lbl_total.pack(side="left", padx=5)
+        ttk.Label(resumo, textvariable=total_var, background=COLORS["card"], font=("Segoe UI", 10, "bold")).pack(side="left", padx=6)
+        ttk.Label(resumo, textvariable=ativos_var, background=COLORS["card"]).pack(side="left", padx=16)
+        ttk.Label(resumo, textvariable=baixados_var, background=COLORS["card"]).pack(side="left", padx=16)
+        ttk.Label(resumo, textvariable=top_var, background=COLORS["card"], foreground=COLORS["muted"]).pack(side="left", padx=16)
 
-        lbl_ativos = tk.Label(frame_resumo, text="Ativos: 0")
-        lbl_ativos.pack(side="left", padx=15)
-
-        lbl_baixados = tk.Label(frame_resumo, text="Baixados: 0")
-        lbl_baixados.pack(side="left", padx=15)
-
-        lbl_por_emp = tk.Label(frame_resumo, text="Por empresa: -")
-        lbl_por_emp.pack(side="left", padx=15)
-
-        # ===== tabela =====
-        frame_lista = tk.Frame(rel, padx=10, pady=10)
-        frame_lista.pack(fill="both", expand=True)
+        lista = ttk.Frame(container, style="Card.TFrame", padding=12)
+        lista.pack(fill="both", expand=True)
+        lista.configure(relief="solid")
+        lista["borderwidth"] = 1
 
         cols = ("id", "motorista", "placa", "telefone", "fornecedor", "destino", "entrada", "saida", "porteiro")
-        tree = ttk.Treeview(frame_lista, columns=cols, show="headings")
+        tree = ttk.Treeview(lista, columns=cols, show="headings")
         for c in cols:
             tree.heading(c, text=c.upper())
 
@@ -921,23 +1700,21 @@ def iniciar_tela():
         tree.column("motorista", width=200)
         tree.column("placa", width=90, anchor="center")
         tree.column("telefone", width=110, anchor="center")
-        tree.column("fornecedor", width=160)
+        tree.column("fornecedor", width=180)
         tree.column("destino", width=140)
-        tree.column("entrada", width=140, anchor="center")
-        tree.column("saida", width=140, anchor="center")
-        tree.column("porteiro", width=140)
+        tree.column("entrada", width=150, anchor="center")
+        tree.column("saida", width=150, anchor="center")
+        tree.column("porteiro", width=150)
 
-        frame_lista.grid_rowconfigure(0, weight=1)
-        frame_lista.grid_columnconfigure(0, weight=1)
-        tree.grid(row=0, column=0, sticky="nsew")
+        tree.pack(fill="both", expand=True)
 
-        sy = ttk.Scrollbar(frame_lista, orient="vertical", command=tree.yview)
-        sy.grid(row=0, column=1, sticky="ns")
-        sx = ttk.Scrollbar(frame_lista, orient="horizontal", command=tree.xview)
-        sx.grid(row=1, column=0, sticky="ew")
-        tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        sb_y = ttk.Scrollbar(lista, orient="vertical", command=tree.yview)
+        sb_y.pack(side="right", fill="y")
+        sb_x = ttk.Scrollbar(lista, orient="horizontal", command=tree.xview)
+        sb_x.pack(side="bottom", fill="x")
+        tree.configure(yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
 
-        dados_atual = []  # guarda as linhas para exportar
+        dados_atual = []
 
         def carregar_relatorio():
             nonlocal dados_atual
@@ -951,7 +1728,6 @@ def iniciar_tela():
                 messagebox.showwarning("Período inválido", "Data inicial maior que data final.")
                 return
 
-            # query base
             q = """
                 SELECT id, motorista, placa, telefone, fornecedor, destino, data_hora, saida, porteiro
                 FROM entradas
@@ -981,7 +1757,6 @@ def iniciar_tela():
             cur.execute(q, params)
             rows = cur.fetchall()
 
-            # filtro de período em Python (porque as datas estão como texto BR)
             tipo = var_tipo_data.get()
             filtrado = []
             for r in rows:
@@ -989,32 +1764,27 @@ def iniciar_tela():
                 dt_str = entrada if tipo == "ENTRADA" else saida
                 dt = _parse_dt(dt_str) if dt_str else None
 
-                if ini and dt:
-                    if dt < ini:
-                        continue
+                if ini and dt and dt < ini:
+                    continue
                 if fim and dt:
-                    # inclui o dia final inteiro
                     fim_fechamento = fim.replace(hour=23, minute=59, second=59)
                     if dt > fim_fechamento:
                         continue
 
-                # se tipo == BAIXA e a linha não tem baixa, ignora quando período está preenchido
                 if tipo == "BAIXA" and (var_ini.get().strip() or var_fim.get().strip()) and not saida:
                     continue
 
                 filtrado.append(r)
 
-            # preencher tabela
             for r in filtrado:
                 tree.insert("", "end", values=r)
+
             dados_atual = filtrado
 
-            # resumo
             total = len(filtrado)
             ativos = sum(1 for r in filtrado if r[7] is None)
             baixados = total - ativos
 
-            # por empresa/destino (top 3)
             cont = {}
             for r in filtrado:
                 d = (r[5] or "").strip().upper()
@@ -1022,10 +1792,10 @@ def iniciar_tela():
             top = sorted(cont.items(), key=lambda x: x[1], reverse=True)[:3]
             top_txt = ", ".join([f"{k}:{v}" for k, v in top]) if top else "-"
 
-            lbl_total.config(text=f"Total: {total}")
-            lbl_ativos.config(text=f"Ativos: {ativos}")
-            lbl_baixados.config(text=f"Baixados: {baixados}")
-            lbl_por_emp.config(text=f"Por empresa: {top_txt}")
+            total_var.set(f"Total: {total}")
+            ativos_var.set(f"Ativos: {ativos}")
+            baixados_var.set(f"Baixados: {baixados}")
+            top_var.set(f"Por empresa: {top_txt}")
 
         def exportar_csv():
             if not dados_atual:
@@ -1050,64 +1820,66 @@ def iniciar_tela():
                         w.writerow(list(r))
 
                 messagebox.showinfo("Exportado", f"Relatório salvo em:\n{arquivo}")
+                set_status("Relatório exportado em CSV.", "success")
             except Exception as e:
                 messagebox.showerror("Erro ao exportar", str(e))
+                set_status("Erro ao exportar CSV.", "error")
 
-        frame_btn = tk.Frame(rel, pady=10)
-        frame_btn.pack(fill="x")
+        btns = ttk.Frame(filtro, style="Card.TFrame")
+        btns.grid(row=1, column=8, rowspan=2, padx=10, sticky="ns")
 
-        ttk.Button(frame_btn, text="GERAR RELATÓRIO", command=carregar_relatorio).pack(side="left", padx=10)
-        ttk.Button(frame_btn, text="EXPORTAR CSV", command=exportar_csv).pack(side="left", padx=10)
+        tk.Button(btns, text="GERAR", command=carregar_relatorio, bd=0, padx=12, pady=8,
+                  bg=COLORS["primary"], fg="white", font=("Segoe UI", 9, "bold")).pack(fill="x", pady=(0, 8))
+        tk.Button(btns, text="EXPORTAR CSV", command=exportar_csv, bd=0, padx=12, pady=8,
+                  bg=COLORS["accent"], fg="white", font=("Segoe UI", 9, "bold")).pack(fill="x")
 
-        # carregar de primeira (opcional)
         carregar_relatorio()
 
+    # ===== Header Buttons =====
+    btn_hist = header_button(header_btns, "Histórico", abrir_historico, COLORS["accent"])
+    btn_logs = header_button(header_btns, "Logs", abrir_logs, COLORS["accent"])
+    btn_rel = header_button(header_btns, "Relatórios", abrir_relatorios, COLORS["accent"])
+    btn_users = header_button(header_btns, "Usuários", abrir_cadastro_usuarios, COLORS["accent"])
+    btn_trocar = header_button(header_btns, "Trocar usuário", logout, COLORS["danger"])
 
-    # ================= BOTÕES PRINCIPAIS =================
-    tk.Button(frame_form, text="REGISTRAR ENTRADA", bg="#2980b9", fg="white", width=25,
-              command=registrar_entrada).grid(row=linha, column=0, columnspan=2, pady=10)
+    btn_hist.pack(side="left", padx=5)
+    btn_logs.pack(side="left", padx=5)
+    btn_rel.pack(side="left", padx=5)
+    btn_users.pack(side="left", padx=5)
+    btn_trocar.pack(side="left", padx=5)
 
-    tk.Button(frame_form, text="HISTÓRICO DE BAIXAS", bg="#7f8c8d", fg="white", width=25,
-              command=abrir_historico).grid(row=linha + 1, column=0, columnspan=2, pady=5)
+    # ===== botões do lado esquerdo =====
+    def registrar_entrada_btn():
+        registrar_entrada()
 
-    tk.Button(frame_form, text="LOGS DO SISTEMA", bg="#34495e", fg="white", width=25,
-              command=abrir_logs).grid(row=linha + 2, column=0, columnspan=2, pady=5)
+    main_button(btns_card, "REGISTRAR ENTRADA", registrar_entrada_btn, COLORS["primary"]).pack(fill="x", pady=(0, 8))
+    main_button(btns_card, "LIMPAR CAMPOS", limpar_campos, "#374151").pack(fill="x")
 
-    tk.Button(frame_form, text="USUÁRIOS (CADASTRO)", bg="#8e44ad", fg="white", width=25,
-              command=abrir_cadastro_usuarios).grid(row=linha + 3, column=0, columnspan=2, pady=5)
+    # ================= BLOCOS (direita) =================
+    blocos_card = ttk.Frame(right, style="Card.TFrame", padding=12)
+    blocos_card.pack(fill="both", expand=True)
+    blocos_card.configure(relief="solid")
+    blocos_card["borderwidth"] = 1
 
-    tk.Button(frame_form, text="TROCAR USUÁRIO", bg="#c0392b", fg="white", width=25,
-              command=logout).grid(row=linha + 4, column=0, columnspan=2, pady=5)
+    ttk.Label(blocos_card, text="Entradas Ativas", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 10))
+    ttk.Label(blocos_card, text="Organizado por empresa/destino.", background=COLORS["card"],
+              foreground=COLORS["muted"]).pack(anchor="w", pady=(0, 10))
 
-    tk.Button(frame_form, text="RELATÓRIOS / EXPORTAR", bg="#16a085", fg="white", width=25,
-              command=abrir_relatorios).grid(row=linha + 5, column=0, columnspan=2, pady=5)
-
-    # ================= BUSCA =================
-    frame_busca = tk.Frame(window)
-    frame_busca.pack(fill="x", padx=10)
-
-    tk.Label(frame_busca, text="Pesquisar por placa ou empresa:").pack(side="left")
-
-    var_busca = tk.StringVar()
-    var_busca.trace_add("write", lambda *a: (forcar_maiusculo(var_busca), carregar_blocos()))
-    tk.Entry(frame_busca, textvariable=var_busca, width=25).pack(side="left", padx=5)
-
-    # ================= ÁREA DE BLOCOS (HORIZONTAL + SCROLL) =================
-    blocos_container = tk.Frame(window)
+    blocos_container = ttk.Frame(blocos_card, style="Card.TFrame")
     blocos_container.pack(fill="both", expand=True)
 
-    canvas_blocos = tk.Canvas(blocos_container)
+    canvas_blocos = tk.Canvas(blocos_container, bg=COLORS["card"], highlightthickness=0)
     canvas_blocos.pack(side="left", fill="both", expand=True)
 
     scroll_y_blocos = ttk.Scrollbar(blocos_container, orient="vertical", command=canvas_blocos.yview)
     scroll_y_blocos.pack(side="right", fill="y")
 
-    scroll_x_blocos = ttk.Scrollbar(window, orient="horizontal", command=canvas_blocos.xview)
-    scroll_x_blocos.pack(fill="x")
+    scroll_x_blocos = ttk.Scrollbar(blocos_card, orient="horizontal", command=canvas_blocos.xview)
+    scroll_x_blocos.pack(fill="x", pady=(8, 0))
 
     canvas_blocos.configure(yscrollcommand=scroll_y_blocos.set, xscrollcommand=scroll_x_blocos.set)
 
-    frame_blocos = tk.Frame(canvas_blocos)
+    frame_blocos = ttk.Frame(canvas_blocos, style="Card.TFrame")
     canvas_window_id = canvas_blocos.create_window((0, 0), window=frame_blocos, anchor="nw")
 
     def _ajustar_scroll_blocos(event=None):
@@ -1120,7 +1892,10 @@ def iniciar_tela():
 
     canvas_blocos.bind("<Configure>", _on_canvas_configure)
 
-    # ================= BLOCOS ATIVOS (COLUNAS + CARDS EM HORIZONTAL) =================
+    def _cards_por_linha():
+        w = window.winfo_width()
+        return 3 if w >= 1700 else 2
+
     def carregar_blocos():
         for w in frame_blocos.winfo_children():
             w.destroy()
@@ -1150,45 +1925,69 @@ def iniciar_tela():
             if d not in destinos_ordenados:
                 destinos_ordenados.append(d)
 
-        CARDS_POR_LINHA = 2  # ajuste se quiser 3
+        CPL = _cards_por_linha()
 
         for col, destino in enumerate(destinos_ordenados):
-            coluna = tk.Frame(frame_blocos, bd=2, relief="groove", padx=10, pady=10)
+            coluna = ttk.Frame(frame_blocos, style="Card.TFrame", padding=10)
             coluna.grid(row=0, column=col, padx=10, pady=10, sticky="n")
+            coluna.configure(relief="solid")
+            coluna["borderwidth"] = 1
 
-            tk.Label(coluna, text=destino, font=("Arial", 12, "bold")).pack(anchor="center", pady=(0, 8))
+            qtd = len(por_destino.get(destino, []))
+            ttk.Label(coluna, text=f"{destino} ({qtd})", background=COLORS["card"],
+                      foreground=COLORS["primary"], font=("Segoe UI", 10, "bold")).pack(anchor="w")
 
-            cards_area = tk.Frame(coluna)
+            ttk.Separator(coluna).pack(fill="x", pady=8)
+
+            cards_area = ttk.Frame(coluna, style="Card.TFrame")
             cards_area.pack()
 
             itens = por_destino.get(destino, [])
-            if not itens:
-                tk.Label(cards_area, text="(sem entradas)", fg="gray").grid(row=0, column=0)
-                continue
-
             for idx, reg in enumerate(itens, start=1):
                 id_reg, motorista, placa, telefone, fornecedor, _dest, data, porteiro = reg
 
                 pos = idx - 1
-                r = pos // CARDS_POR_LINHA
-                c = pos % CARDS_POR_LINHA
+                r = pos // CPL
+                c = pos % CPL
 
-                card = tk.Frame(cards_area, bd=1, relief="solid", padx=8, pady=6)
+                card = ttk.Frame(cards_area, style="Card.TFrame", padding=10)
                 card.grid(row=r, column=c, padx=8, pady=8, sticky="n")
+                card.configure(relief="solid")
+                card["borderwidth"] = 1
 
-                tk.Label(card, text=f"{idx}) {placa} - {motorista}", font=("Arial", 10, "bold")).pack(anchor="w")
-                tk.Label(card, text=f"TEL: {telefone} | FORN: {fornecedor}").pack(anchor="w")
-                tk.Label(card, text=f"ENTRADA: {data} | PORTEIRO: {porteiro}").pack(anchor="w")
+                ttk.Label(card, text=f"{idx}) {placa}", background=COLORS["card"],
+                          foreground=COLORS["text"], font=("Segoe UI", 10, "bold")).pack(anchor="w")
+                ttk.Label(card, text=f"{motorista}", background=COLORS["card"],
+                          foreground=COLORS["primary"]).pack(anchor="w")
+
+                ttk.Label(card, text=f"TEL: {telefone}", background=COLORS["card"],
+                          foreground=COLORS["muted"]).pack(anchor="w", pady=(6, 0))
+                ttk.Label(card, text=f"FORN: {fornecedor}", background=COLORS["card"],
+                          foreground=COLORS["muted"]).pack(anchor="w")
+                ttk.Label(card, text=f"ENTRADA: {data}", background=COLORS["card"],
+                          foreground=COLORS["muted"]).pack(anchor="w")
+                ttk.Label(card, text=f"PORTEIRO: {porteiro}", background=COLORS["card"],
+                          foreground=COLORS["muted"]).pack(anchor="w")
 
                 tk.Button(
-                    card, text="REGISTRAR SAÍDA",
-                    bg="#27ae60", fg="white",
-                    command=lambda i=id_reg: registrar_saida(i)
-                ).pack(anchor="e", pady=(6, 0))
+                    card, text="REGISTRAR SAÍDA", command=lambda i=id_reg: registrar_saida(i),
+                    bd=0, padx=10, pady=8, bg=COLORS["success"], fg="white",
+                    font=("Segoe UI", 9, "bold"), cursor="hand2"
+                ).pack(fill="x", pady=(10, 0))
 
         _ajustar_scroll_blocos()
 
-    # Login obrigatório
+    # ===== Status bar =====
+    status_label = tk.Label(root_container, textvariable=status_var, bg=COLORS["primary_dark"], fg="white",
+                            padx=10, pady=8, anchor="w", font=("Segoe UI", 9))
+    status_label.pack(fill="x")
+
+    # ===== Inicialização =====
     abrir_login()
     carregar_blocos()
+    set_status("Sistema pronto. Faça o cadastro de entradas.", "info")
     window.mainloop()
+
+
+if __name__ == "__main__":
+    iniciar_tela()
