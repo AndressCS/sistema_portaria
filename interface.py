@@ -6,12 +6,18 @@ import re
 import hashlib
 import secrets
 import os
+import shutil
 from PIL import Image, ImageTk
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
-import shutil
-from tkinter import filedialog
+import sys
+import socket
+import getpass
+import platform
+
+
+
 
 
 DB_PATH = "portaria.db"
@@ -240,6 +246,233 @@ def iniciar_tela():
             acao, entrada_id, placa, destino, porteiro, detalhes
         ))
         con.commit()
+
+    # ================= AUDITORIA (PC / IP / USER) =================
+    def get_audit_info() -> str:
+        """
+        Retorna uma string curta com informações do ambiente:
+        PC, usuário do Windows, IP local (se conseguir) e sistema.
+        """
+        try:
+            pc = socket.gethostname()
+        except Exception:
+            pc = "N/D"
+
+        try:
+            user_os = getpass.getuser()
+        except Exception:
+            user_os = "N/D"
+
+        ip = "N/D"
+        try:
+            # tenta descobrir IP local real
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            try:
+                ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                ip = "N/D"
+
+        try:
+            sysinfo = f"{platform.system()} {platform.release()}"
+        except Exception:
+            sysinfo = "N/D"
+
+        return f"PC={pc} | USER={user_os} | IP={ip} | SYS={sysinfo}"
+
+    def log_auditoria(acao: str, entrada_id=None, placa=None, destino=None, detalhes=""):
+        """
+        Wrapper do registrar_log que sempre inclui audit info.
+        """
+        extra = get_audit_info()
+        detalhes_final = (detalhes or "").strip()
+        if detalhes_final:
+            detalhes_final = f"{detalhes_final} | {extra}"
+        else:
+            detalhes_final = extra
+
+        registrar_log(
+            acao=acao,
+            entrada_id=entrada_id,
+            placa=placa,
+            destino=destino,
+            porteiro=usuario_logado.get("nome") or var_porteiro.get(),
+            detalhes=detalhes_final
+        )
+
+        # ================= BACKUP / RESTORE =================
+    def _backup_dir_padrao():
+        base = os.path.dirname(os.path.abspath(__file__))
+        pasta = os.path.join(base, "backups")
+        os.makedirs(pasta, exist_ok=True)
+        return pasta
+
+    def _log_restore_em_arquivo(texto: str):
+        try:
+            pasta = _backup_dir_padrao()
+            path = os.path.join(pasta, "auditoria_restore.log")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(texto + "\n")
+        except Exception:
+            pass
+
+    def fazer_backup_agora():
+        try:
+            if not os.path.exists(DB_PATH):
+                messagebox.showerror("Backup", f"Banco não encontrado em:\n{os.path.abspath(DB_PATH)}")
+                return
+
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            nome = f"backup_portaria_{ts}.db"
+
+            destino = filedialog.asksaveasfilename(
+                title="Salvar backup do banco",
+                initialdir=_backup_dir_padrao(),
+                initialfile=nome,
+                defaultextension=".db",
+                filetypes=[("Banco SQLite", "*.db"), ("Todos arquivos", "*.*")]
+            )
+            if not destino:
+                return
+
+            try:
+                con.commit()
+            except Exception:
+                pass
+
+            shutil.copy2(DB_PATH, destino)
+
+            log_auditoria(
+                "BACKUP",
+                detalhes=f"Backup criado: {destino}"
+            )
+
+            set_status("Backup criado com sucesso.", "success")
+            messagebox.showinfo("Backup", f"Backup criado com sucesso:\n{destino}")
+
+        except Exception as e:
+            messagebox.showerror("Erro no backup", str(e))
+            set_status("Erro ao criar backup.", "error")
+
+    def backup_automatico_diario():
+        try:
+            pasta = _backup_dir_padrao()
+
+            hoje = datetime.now().strftime("%Y-%m-%d")
+            nome_hoje = f"auto_backup_{hoje}.db"
+            caminho_hoje = os.path.join(pasta, nome_hoje)
+
+            # Se já existe backup hoje, não faz outro
+            if os.path.exists(caminho_hoje):
+                return
+
+            try:
+                con.commit()
+            except Exception:
+                pass
+
+            shutil.copy2(DB_PATH, caminho_hoje)
+
+            log_auditoria(
+                "AUTO_BACKUP",
+                detalhes=f"Backup automático diário: {caminho_hoje}"
+            )
+
+            # Limpeza automática: mantém apenas últimos 14
+            arquivos = sorted(
+                [f for f in os.listdir(pasta) if f.startswith("auto_backup_")],
+                reverse=True
+            )
+
+            for antigo in arquivos[14:]:
+                try:
+                    os.remove(os.path.join(pasta, antigo))
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print("Erro no backup automático:", e)
+
+
+    def _reiniciar_aplicacao():
+        try:
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
+        except Exception as e:
+            messagebox.showerror(
+                "Reinício",
+                f"Não consegui reiniciar automaticamente.\nFeche e abra o sistema.\n\nDetalhes: {e}"
+            )
+
+    def restaurar_backup():
+        if usuario_logado.get("role") != "ADMIN":
+            messagebox.showwarning("Acesso negado", "Apenas ADMIN pode restaurar backups.")
+            return
+
+        arquivo = filedialog.askopenfilename(
+            title="Selecionar backup para restaurar",
+            initialdir=_backup_dir_padrao(),
+            filetypes=[("Banco SQLite", "*.db"), ("Todos arquivos", "*.*")]
+        )
+        if not arquivo:
+            return
+
+        if not confirmar_modal(
+                "Restaurar backup",
+                "ATENÇÃO!\n\nRestaurar um backup irá SUBSTITUIR o banco atual.\n"
+                "Recomenda-se fazer um backup antes.\n\nDeseja continuar?",
+                texto_ok="RESTAURAR",
+                texto_cancel="CANCELAR",
+                tipo="danger",
+                detalhes_linhas=[
+                    f"ARQUIVO: {arquivo}",
+                    f"BANCO ATUAL: {os.path.abspath(DB_PATH)}",
+                    f"ADMIN: {usuario_logado.get('nome')}"
+                ]
+        ):
+            return
+
+        try:
+            # backup automático do banco atual antes de restaurar
+            if os.path.exists(DB_PATH):
+                ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                auto = os.path.join(_backup_dir_padrao(), f"auto_before_restore_{ts}.db")
+                try:
+                    con.commit()
+                except Exception:
+                    pass
+                shutil.copy2(DB_PATH, auto)
+
+            # auditoria fora do DB (persistente mesmo após trocar banco)
+            _log_restore_em_arquivo(
+                f"[{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}] "
+                f"RESTORE solicitado por {usuario_logado.get('nome')} ({usuario_logado.get('role')}) | "
+                f"{get_audit_info()} | ARQ={arquivo} | DB={os.path.abspath(DB_PATH)}"
+            )
+
+            # fecha conexão para evitar "database is locked"
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                con.close()
+            except Exception:
+                pass
+
+            # substitui o banco
+            shutil.copy2(arquivo, DB_PATH)
+
+            set_status("Backup restaurado. Reiniciando...", "success")
+            messagebox.showinfo("Restaurado", "Backup restaurado com sucesso.\nO sistema será reiniciado.")
+            _reiniciar_aplicacao()
+
+        except Exception as e:
+            messagebox.showerror("Erro ao restaurar", str(e))
+            set_status("Erro ao restaurar backup.", "error")
 
     def criar_usuario_se_nao_existir(usuario: str, nome: str, senha: str, role: str = "PORTEIRO"):
         usuario = (usuario or "").strip().upper()
@@ -949,9 +1182,6 @@ def iniciar_tela():
         abrir_login()
 
     def abrir_cadastro_usuarios():
-        if usuario_logado.get("role") != "ADMIN":
-            messagebox.showwarning("Acesso negado", "Apenas ADMIN pode gerenciar usuários.")
-            return
 
         win = tk.Toplevel(window)
         win.title("Cadastro de Usuários")
@@ -1314,7 +1544,7 @@ def iniciar_tela():
             baixas_em_andamento.discard(id_registro)
 
     def desfazer_baixa(id_registro):
-        if usuario_logado.get("role") != "ADMIN":
+        if usuario_logado.get("role") != "PORTEIRO":
             messagebox.showwarning("Acesso negado", "Apenas ADMIN pode desfazer baixa.")
             return
 
@@ -1362,7 +1592,7 @@ def iniciar_tela():
                 placa=placa_,
                 destino=destino_,
                 porteiro=usuario_logado.get("nome"),
-                detalhes="BAIXA DESFEITA"
+                detalhes=f"BAIXA DESFEITA | PERFIL={usuario_logado.get('role')}"
             )
 
             set_status(f"Baixa desfeita: {placa_}.", "success")
@@ -1911,6 +2141,10 @@ def iniciar_tela():
                     ws.column_dimensions[col_letter].width = min(max_len + 3, 55)
 
                 wb.save(arquivo)
+                log_auditoria(
+                    "EXPORT_EXCEL",
+                    detalhes=f"Relatório exportado: {arquivo} | Total linhas={len(dados_atual)}"
+                )
                 messagebox.showinfo("Exportado", f"Relatório salvo em:\n{arquivo}")
                 set_status("Relatório exportado em Excel.", "success")
 
@@ -1938,10 +2172,16 @@ def iniciar_tela():
     btn_rel = header_button(header_btns, "Relatórios", abrir_relatorios, COLORS["accent"])
     btn_users = header_button(header_btns, "Usuários", abrir_cadastro_usuarios, COLORS["accent"])
     btn_trocar = header_button(header_btns, "Trocar usuário", logout, COLORS["danger"])
+    btn_backup = header_button(header_btns, "Backup", fazer_backup_agora, COLORS["accent"])
+    btn_restore = header_button(header_btns, "Restaurar DB", restaurar_backup, COLORS["warning"])
 
     btn_hist.pack(side="left", padx=5)
     btn_logs.pack(side="left", padx=5)
     btn_rel.pack(side="left", padx=5)
+
+    btn_backup.pack(side="left", padx=5)
+    btn_restore.pack(side="left", padx=5)
+
     btn_users.pack(side="left", padx=5)
     btn_trocar.pack(side="left", padx=5)
 
@@ -2081,9 +2321,11 @@ def iniciar_tela():
 
     # ===== Inicialização =====
     abrir_login()
+    backup_automatico_diario()
     carregar_blocos()
     set_status("Sistema pronto. Faça o cadastro de entradas.", "info")
     window.mainloop()
+
 
 
 if __name__ == "__main__":
