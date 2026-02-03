@@ -20,6 +20,7 @@ import platform
 
 
 
+
 DB_PATH = "portaria.db"
 
 EMPRESAS = [
@@ -106,7 +107,7 @@ def usuario_valido(u: str) -> bool:
 
 
 def _asset_path(nome: str) -> str:
-    base = os.path.dirname(os.path.abspath(__file__))
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, "assets", nome)
 
 
@@ -141,6 +142,14 @@ def iniciar_tela():
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA busy_timeout=10000;")
     cur = con.cursor()
+
+    def tem_coluna(tabela: str, coluna: str) -> bool:
+        try:
+            cur.execute(f"PRAGMA table_info({tabela})")
+            cols = [r[1].lower() for r in cur.fetchall()]
+            return coluna.lower() in cols
+        except Exception:
+            return False
 
     # ===== TABELAS =====
     cur.execute("""
@@ -210,6 +219,11 @@ def iniciar_tela():
     usuario_logado = {"usuario": None, "nome": None, "role": None}
     baixas_em_andamento = set()
     desfazer_em_andamento = set()
+    janelas = {
+        "historico": None,
+        "logs": None,
+        "relatorios": None
+    }
 
     # ===== status bar =====
     status_var = tk.StringVar(value="Pronto.")
@@ -813,12 +827,12 @@ def iniciar_tela():
         e.grid(row=r, column=1, sticky="we", pady=4)
         return e
 
-    mk_label("Motorista", 0)
-    entry_motorista = mk_entry(var_motorista, 0)
-
-    mk_label("Placa", 1)
+    mk_label("Placa", 0)
     vcmd_placa = (window.register(validar_placa_digitar), "%P")
-    entry_placa = mk_entry(var_placa, 1, validate=vcmd_placa)
+    entry_placa = mk_entry(var_placa, 0, validate=vcmd_placa)
+
+    mk_label("Motorista", 1)
+    entry_motorista = mk_entry(var_motorista, 1)
 
     mk_label("Telefone", 2)
     vcmd_tel = (window.register(validar_telefone_digitar), "%P")
@@ -1183,6 +1197,14 @@ def iniciar_tela():
 
     def abrir_cadastro_usuarios():
 
+        if usuario_logado.get("role") != "ADMIN":
+            messagebox.showwarning(
+                "Acesso restrito",
+                "Esta área é restrita ao ADMINISTRADOR.\n\n"
+                "Caso precise de acesso, solicite ao responsável pelo sistema."
+            )
+            return
+
         win = tk.Toplevel(window)
         win.title("Cadastro de Usuários")
         win.state("zoomed")
@@ -1454,19 +1476,31 @@ def iniciar_tela():
                 set_status("Placa já possui entrada ativa.", "warning")
                 return
 
-            cur.execute("""
-                INSERT INTO entradas
-                (motorista, placa, telefone, fornecedor, destino, data_hora, porteiro)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
+            destino_txt = var_destino.get().strip().upper()
+
+            # Monta INSERT compatível com o banco
+            colunas = ["motorista", "placa", "telefone", "fornecedor", "data_hora", "porteiro"]
+            valores = [
                 var_motorista.get().strip().upper(),
                 var_placa.get().strip().upper(),
                 var_telefone.get().strip(),
                 var_fornecedor.get().strip().upper(),
-                var_destino.get().strip().upper(),
                 datetime.now().strftime("%d/%m/%Y %H:%M"),
                 var_porteiro.get().strip().upper()
-            ))
+            ]
+
+            # Se existe 'destino', grava
+            if tem_coluna("entradas", "destino"):
+                colunas.append("destino")
+                valores.append(destino_txt)
+
+            # Se existe 'empresa' (banco antigo) e é NOT NULL, grava também
+            if tem_coluna("entradas", "empresa"):
+                colunas.append("empresa")
+                valores.append(destino_txt)
+
+            sql = f"INSERT INTO entradas ({', '.join(colunas)}) VALUES ({', '.join(['?'] * len(colunas))})"
+            cur.execute(sql, valores)
             con.commit()
             entrada_id = cur.lastrowid
 
@@ -1606,10 +1640,22 @@ def iniciar_tela():
 
     # ================= HISTÓRICO / LOGS / RELATÓRIOS =================
     def abrir_historico():
+
+        if janelas["historico"] is not None and janelas["historico"].winfo_exists():
+            janelas["historico"].deiconify()
+            janelas["historico"].lift()
+            janelas["historico"].focus_force()
+            return
+
         hist = tk.Toplevel(window)
+        janelas["historico"] = hist
         hist.title("Histórico de Baixas")
         hist.state("zoomed")
         hist.configure(bg=COLORS["bg"])
+
+        def ao_fechar():
+            janelas["historico"] = None
+            hist.destroy()
 
         container = ttk.Frame(hist, padding=14)
         container.pack(fill="both", expand=True)
@@ -1714,10 +1760,24 @@ def iniciar_tela():
         carregar_historico()
 
     def abrir_logs():
+
+        if janelas["logs"] is not None and janelas["logs"].winfo_exists():
+            janelas["logs"].deiconify()
+            janelas["logs"].lift()
+            janelas["logs"].focus_force()
+            return
+
         logw = tk.Toplevel(window)
+        janelas["logs"] = logw
         logw.title("Logs do Sistema")
         logw.state("zoomed")
         logw.configure(bg=COLORS["bg"])
+
+        def ao_fechar():
+            janelas["logs"] = None
+            logw.destroy()
+
+        logw.protocol("WM_DELETE_WINDOW", ao_fechar)
 
         container = ttk.Frame(logw, padding=14)
         container.pack(fill="both", expand=True)
@@ -1846,10 +1906,25 @@ def iniciar_tela():
         return None
 
     def abrir_relatorios():
+
+        if janelas["relatorios"] is not None and janelas["relatorios"].winfo_exists():
+            janelas["relatorios"].deiconify()
+            janelas["relatorios"].lift()
+            janelas["relatorios"].focus_force()
+            return
+
         rel = tk.Toplevel(window)
+        janelas["relatorios"] = rel
         rel.title("Relatórios e Exportação")
         rel.state("zoomed")
         rel.configure(bg=COLORS["bg"])
+
+        def ao_fechar():
+            janelas["relatorios"] = None
+            rel.destroy()
+
+        rel.protocol("WM_DELETE_WINDOW", ao_fechar)
+
 
         container = ttk.Frame(rel, padding=14)
         container.pack(fill="both", expand=True)
@@ -2297,14 +2372,85 @@ def iniciar_tela():
                 ttk.Label(card, text=f"{motorista}", background=COLORS["card"],
                           foreground=COLORS["primary"]).pack(anchor="w")
 
-                ttk.Label(card, text=f"TEL: {telefone}", background=COLORS["card"],
-                          foreground=COLORS["muted"]).pack(anchor="w", pady=(6, 0))
-                ttk.Label(card, text=f"FORN: {fornecedor}", background=COLORS["card"],
-                          foreground=COLORS["muted"]).pack(anchor="w")
-                ttk.Label(card, text=f"ENTRADA: {data}", background=COLORS["card"],
-                          foreground=COLORS["muted"]).pack(anchor="w")
-                ttk.Label(card, text=f"PORTEIRO: {porteiro}", background=COLORS["card"],
-                          foreground=COLORS["muted"]).pack(anchor="w")
+                # ===== TEL (rótulo forte + valor normal) =====
+                linha_tel = ttk.Frame(card, style="Card.TFrame")
+                linha_tel.pack(anchor="w", pady=(6, 0))
+
+                ttk.Label(
+                    linha_tel,
+                    text="TEL:",
+                    background=COLORS["card"],
+                    foreground=COLORS["text"],
+                    font=("Segoe UI", 9, "bold")
+                ).pack(side="left")
+
+                ttk.Label(
+                    linha_tel,
+                    text=f" {telefone}",
+                    background=COLORS["card"],
+                    foreground=COLORS["text"],
+                    font=("Segoe UI", 9)
+                ).pack(side="left")
+
+                # ===== FORN =====
+                linha_forn = ttk.Frame(card, style="Card.TFrame")
+                linha_forn.pack(anchor="w")
+
+                ttk.Label(
+                    linha_forn,
+                    text="FORN:",
+                    background=COLORS["card"],
+                    foreground=COLORS["text"],
+                    font=("Segoe UI", 9, "bold")
+                ).pack(side="left")
+
+                ttk.Label(
+                    linha_forn,
+                    text=f" {fornecedor}",
+                    background=COLORS["card"],
+                    foreground=COLORS["text"],
+                    font=("Segoe UI", 9)
+                ).pack(side="left")
+
+                # ===== ENTRADA =====
+                linha_ent = ttk.Frame(card, style="Card.TFrame")
+                linha_ent.pack(anchor="w")
+
+                ttk.Label(
+                    linha_ent,
+                    text="ENTRADA:",
+                    background=COLORS["card"],
+                    foreground=COLORS["text"],
+                    font=("Segoe UI", 9, "bold")
+                ).pack(side="left")
+
+                ttk.Label(
+                    linha_ent,
+                    text=f" {data}",
+                    background=COLORS["card"],
+                    foreground=COLORS["text"],
+                    font=("Segoe UI", 9)
+                ).pack(side="left")
+
+                # ===== PORTEIRO =====
+                linha_port = ttk.Frame(card, style="Card.TFrame")
+                linha_port.pack(anchor="w")
+
+                ttk.Label(
+                    linha_port,
+                    text="PORTEIRO:",
+                    background=COLORS["card"],
+                    foreground=COLORS["text"],
+                    font=("Segoe UI", 9, "bold")
+                ).pack(side="left")
+
+                ttk.Label(
+                    linha_port,
+                    text=f" {porteiro}",
+                    background=COLORS["card"],
+                    foreground=COLORS["text"],
+                    font=("Segoe UI", 9)
+                ).pack(side="left")
 
                 tk.Button(
                     card, text="REGISTRAR SAÍDA", command=lambda i=id_reg: registrar_saida(i),
@@ -2314,10 +2460,37 @@ def iniciar_tela():
 
         _ajustar_scroll_blocos()
 
-    # ===== Status bar =====
-    status_label = tk.Label(root_container, textvariable=status_var, bg=COLORS["primary_dark"], fg="white",
-                            padx=10, pady=8, anchor="w", font=("Segoe UI", 9))
-    status_label.pack(fill="x")
+    # ===== Status bar + Créditos =====
+    status_bar = tk.Frame(root_container, bg=COLORS["primary_dark"])
+    status_bar.pack(fill="x")
+
+    status_label = tk.Label(
+        status_bar,
+        textvariable=status_var,
+        bg=COLORS["primary_dark"],
+        fg="white",
+        padx=10,
+        pady=8,
+        anchor="w",
+        font=("Segoe UI", 9)
+    )
+    status_label.pack(side="left", fill="x", expand=True)
+
+    def abrir_github(event=None):
+        import webbrowser
+        webbrowser.open("https://github.com/AndressCS")
+
+    creditos = tk.Label(
+        status_bar,
+        text="Desenvolvido por Andress Silva • GitHub",
+        bg=COLORS["primary_dark"],
+        fg="#93C5FD",  # azul claro
+        cursor="hand2",
+        padx=12,
+        font=("Segoe UI", 9, "bold")
+    )
+    creditos.pack(side="right")
+    creditos.bind("<Button-1>", abrir_github)
 
     # ===== Inicialização =====
     abrir_login()
