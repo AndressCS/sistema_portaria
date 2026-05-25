@@ -1,10 +1,10 @@
 # Sistema de Portaria
 
-Sistema desenvolvido em Python para controle de entrada e saída de visitantes, moradores e prestadores de serviço.
+Sistema desenvolvido em Python para controle de entrada e saída de motoristas.
 
 ## Funcionalidades
 
-- Cadastro de visitantes
+- Cadastro de motoristas
 - Registro de entrada e saída
 - Controle de acesso
 - Histórico de movimentações
