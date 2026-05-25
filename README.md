@@ -15,11 +15,7 @@ Sistema desenvolvido em Python para controle de entrada e saída de motoristas.
 - SQLite
 - Tkinter (se estiver usando)
 
-## Como executar
-
-```bash
-pip install -r requirements.txt
-python main.py
+## Imagens do sistema
 
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/18191af9-ea58-4d7b-ba5b-6f83c297aea8" />
 
@@ -30,5 +26,11 @@ python main.py
 <img width="266" height="320" alt="image" src="https://github.com/user-attachments/assets/ebd3a816-4ad9-4583-ad23-c11d0a949013" />]
 
 <img width="1920" height="301" alt="image" src="https://github.com/user-attachments/assets/49916cd7-1839-40b4-a160-c3eefd152f1a" />
+
+## Como executar
+
+```bash
+pip install -r requirements.txt
+python main.py
 
 
