@@ -30,7 +30,6 @@ Sistema desenvolvido em Python para controle de entrada e saída de motoristas.
 ## Como executar
 
 ```bash
-pip install -r requirements.txt
-python main.py
+pyinstaller --noconsole --onedir --name SistemaPortaria --add-data "assets;assets" main.py
 
 
