@@ -25,7 +25,7 @@ Sistema desenvolvido em Python para controle de entrada e saída de motoristas.
 
 <img width="1920" height="301" alt="image" src="https://github.com/user-attachments/assets/49916cd7-1839-40b4-a160-c3eefd152f1a" />
 
-## como Logar
+## Como logar
 
 - Login: ADMIN
 - Senha: ADMIN123
