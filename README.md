@@ -27,8 +27,8 @@ Sistema desenvolvido em Python para controle de entrada e saída de motoristas.
 
 ## como Logar
 
-Login: ADMIN
-Senha: ADMIN123
+- Login: ADMIN
+- Senha: ADMIN123
 
 ## Como executar
 
